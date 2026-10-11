@@ -1,0 +1,10 @@
+
+ RUN  v4.1.11 <checkout>/strands-ts
+
+ ✓ test/integ/mcp/mcp-connect-abort.test.node.ts (2 tests) 58ms
+
+ Test Files  1 passed (1)
+      Tests  2 passed (2)
+   Start at  00:31:38
+   Duration  323ms (transform 64ms, setup 0ms, import 173ms, tests 58ms, environment 0ms)
+

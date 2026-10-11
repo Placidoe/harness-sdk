@@ -1,0 +1,41 @@
+Testing types with tsc and vue-tsc is an experimental feature.
+Breaking changes might not follow SemVer, please pin Vitest's version when using it.
+
+ RUN  v4.1.11 <checkout>/strands-ts
+
+12:29:00 AM [vite] (client) [console.warn] error=<Error: Context error> | failed to inject trace context into mcp tool call args
+stderr | src/mcp/__tests__/client.test.ts > MCP Integration > McpClient > passes args unchanged when context injection fails
+error=<Error: Context error> | failed to inject trace context into mcp tool call args
+12:29:00 AM [vite] (client) [console.warn] mime_type=<image/bmp> | unsupported mcp image mime type, falling back to json
+12:29:00 AM [vite] (client) [console.warn] content_type=<image> | mcp image content missing data or mimeType, falling back to json
+stderr | src/mcp/__tests__/client.test.ts > MCP Integration > McpTool > falls back to JsonBlock for unsupported image mime type
+mime_type=<image/bmp> | unsupported mcp image mime type, falling back to json
+stderr | src/mcp/__tests__/client.test.ts > MCP Integration > McpTool > falls back to JsonBlock for image content missing data
+content_type=<image> | mcp image content missing data or mimeType, falling back to json
+12:29:00 AM [vite] (client) [console.warn] mime_type=<application/pdf> | unsupported mcp resource blob mime type, falling back to json
+stderr | src/mcp/__tests__/client.test.ts > MCP Integration > McpTool > falls back to JsonBlock for blob resource with non-image mime type
+mime_type=<application/pdf> | unsupported mcp resource blob mime type, falling back to json
+12:29:00 AM [vite] (client) [console.warn] client=<TestApp>, error=<Error: connection refused> | MCP server failed to connect, continuing (continueOnError)
+stderr | src/mcp/__tests__/client.test.ts > continueOnError > swallows connection failure when continueOnError is true
+client=<TestApp>, error=<Error: connection refused> | MCP server failed to connect, continuing (continueOnError)
+12:29:00 AM [vite] (client) [console.warn] client=<TestApp>, error=<Error: connection refused> | MCP server failed to connect, continuing (continueOnError)
+stderr | src/mcp/__tests__/client.test.ts > continueOnError > listTools returns empty array when continueOnError and connection failed
+client=<TestApp>, error=<Error: connection refused> | MCP server failed to connect, continuing (continueOnError)
+12:29:00 AM [vite] (client) [console.warn] client=<TestApp>, error=<Error: connection refused> | MCP server failed to connect, continuing (continueOnError)
+stderr | src/mcp/__tests__/client.test.ts > continueOnError > callTool throws when continueOnError and connection failed
+client=<TestApp>, error=<Error: connection refused> | MCP server failed to connect, continuing (continueOnError)
+stderr | src/mcp/__tests__/client.test.ts > continueOnError > does not retry connection on subsequent calls after continueOnError failure
+client=<TestApp>, error=<Error: connection refused> | MCP server failed to connect, continuing (continueOnError)
+12:29:00 AM [vite] (client) [console.warn] client=<TestApp>, error=<Error: connection refused> | MCP server failed to connect, continuing (continueOnError)
+12:29:00 AM [vite] (client) [console.warn] client=<TestApp>, error=<Error: connection refused> | MCP server failed to connect, continuing (continueOnError)
+stderr | src/mcp/__tests__/client.test.ts > continueOnError > recovers after explicit connect(true) when server comes back
+client=<TestApp>, error=<Error: connection refused> | MCP server failed to connect, continuing (continueOnError)
+ ✓ |unit-browser (chromium)| src/mcp/__tests__/client.test.ts (108 tests) 590ms
+
+ Test Files  1 passed (1)
+      Tests  108 passed (108)
+   Start at  00:28:54
+   Duration  5.94s (transform 0ms, setup 0ms, import 193ms, tests 590ms, environment 0ms)
+
+JSON report written to <checkout>/strands-ts/test/.artifacts/test-report/json/report.json
+JUNIT report written to <checkout>/strands-ts/test/.artifacts/test-report/junit/report.xml

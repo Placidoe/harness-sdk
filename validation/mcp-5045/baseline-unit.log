@@ -1,0 +1,189 @@
+Testing types with tsc and vue-tsc is an experimental feature.
+Breaking changes might not follow SemVer, please pin Vitest's version when using it.
+Testing types with tsc and vue-tsc is an experimental feature.
+Breaking changes might not follow SemVer, please pin Vitest's version when using it.
+
+ RUN  v4.1.11 <checkout>/strands-ts
+
+stderr | src/mcp/__tests__/client.test.ts > MCP Integration > McpClient > passes args unchanged when context injection fails
+error=<Error: Context error> | failed to inject trace context into mcp tool call args
+
+stderr | src/mcp/__tests__/client.test.ts > MCP Integration > McpTool > falls back to JsonBlock for unsupported image mime type
+mime_type=<image/bmp> | unsupported mcp image mime type, falling back to json
+
+stderr | src/mcp/__tests__/client.test.ts > MCP Integration > McpTool > falls back to JsonBlock for image content missing data
+content_type=<image> | mcp image content missing data or mimeType, falling back to json
+
+stderr | src/mcp/__tests__/client.test.ts > MCP Integration > McpTool > falls back to JsonBlock for blob resource with non-image mime type
+mime_type=<application/pdf> | unsupported mcp resource blob mime type, falling back to json
+
+stderr | src/mcp/__tests__/client.test.ts > continueOnError > swallows connection failure when continueOnError is true
+client=<TestApp>, error=<Error: connection refused> | MCP server failed to connect, continuing (continueOnError)
+
+stderr | src/mcp/__tests__/client.test.ts > continueOnError > listTools returns empty array when continueOnError and connection failed
+client=<TestApp>, error=<Error: connection refused> | MCP server failed to connect, continuing (continueOnError)
+
+stderr | src/mcp/__tests__/client.test.ts > continueOnError > callTool throws when continueOnError and connection failed
+client=<TestApp>, error=<Error: connection refused> | MCP server failed to connect, continuing (continueOnError)
+
+stderr | src/mcp/__tests__/client.test.ts > continueOnError > does not retry connection on subsequent calls after continueOnError failure
+client=<TestApp>, error=<Error: connection refused> | MCP server failed to connect, continuing (continueOnError)
+
+stderr | src/mcp/__tests__/client.test.ts > continueOnError > recovers after explicit connect(true) when server comes back
+client=<TestApp>, error=<Error: connection refused> | MCP server failed to connect, continuing (continueOnError)
+
+ ❯ |unit-node| src/mcp/__tests__/client.test.ts (108 tests | 3 failed) 600ms
+       ✓ initializes SDK client with correct configuration 2ms
+       ✓ injects trace context into tool arguments when active span exists 1ms
+       ✓ merges trace context with existing _meta field 0ms
+       ✓ passes args unchanged when no active span exists 0ms
+       ✓ passes args unchanged when span has empty trace ID 0ms
+       ✓ passes args unchanged when context injection fails 0ms
+       ✓ skips trace context injection when disableMcpInstrumentation is true 0ms
+       ✓ manages connection state lazily 0ms
+       ✓ supports forced reconnection 0ms
+       ✓ stops a caller waiting on a shared connection when its signal aborts 1ms
+       × keeps the connection shared after its creator aborts (continueOnError=false) 2ms
+       × keeps the connection shared after its creator aborts (continueOnError=true) 0ms
+       × releases a rejected connection after its creator aborts so an explicit retry can run 1ms
+       ✓ rejects immediately when connect is called with an aborted signal 0ms
+       ✓ converts SDK tool specs to McpTool instances 0ms
+       ✓ matches strings and regexes against the server-side name and passes the renamed tool to callbacks 0ms
+       ✓ applies allowed before rejected with rejected winning and distinguishes missing from empty allowed 0ms
+       ✓ inherits constructor defaults while explicit empty prefix and filters disable them 0ms
+       ✓ filters and prefixes SDK results and invokes tools by the server-side name 0ms
+       ✓ skips overlong names in listed tools and preserves the 64-character boundary 1ms
+       ✓ throws an actionable error with continueOnError=undefined 0ms
+       ✓ throws an actionable error with continueOnError=false 0ms
+       ✓ surfaces tool annotations in the tool spec 0ms
+       ✓ omits annotations from the tool spec when the server provides none 0ms
+       ✓ omits annotations from the tool spec when the server provides an empty annotations object 0ms
+       ✓ generates description fallback when description is missing 0ms
+       ✓ generates description fallback when description is empty string 0ms
+       ✓ calls the tool with no request options by default 0ms
+       ✓ forwards abort signal to SDK callTool 1ms
+       ✓ still lists tools when tasksConfig is set 0ms
+       ✓ validates tool arguments 0ms
+       ✓ cleans up resources 0ms
+       ✓ supports Symbol.asyncDispose for await using pattern 0ms
+       ✓ registers elicitation handler before connecting when callback is provided 0ms
+       ✓ does not register elicitation handler when no callback is provided 0ms
+       ✓ passes elicitation capabilities to Client when callback is provided 0ms
+       ✓ elicitation handler returns accepted result with content and exposes the abort signal at mcpReq.signal 0ms
+       ✓ elicitation handler returns 'decline' result 0ms
+       ✓ elicitation handler returns 'cancel' result 0ms
+       ✓ elicitation handler works for URL mode params 1ms
+       ✓ elicitation callback errors propagate 0ms
+       ✓ calls onToolsChanged with old names and new tools when list changes 154ms
+       ✓ updates registered tool names after each listTools call 52ms
+       ✓ keeps default registered names after an overridden listing 51ms
+       ✓ reapplies constructor filters and prefix when refreshing 51ms
+       ✓ does not throw when onToolsChanged is not set 2ms
+       ✓ logs warning and preserves registry when listTools fails during refresh (request) 103ms
+       ✓ logs warning and preserves registry when listTools fails during refresh (name length) 101ms
+       ✓ coalesces notifications received during an in-flight refresh into one extra refresh 52ms
+       ✓ exposes the original client without allowing reassignment 1ms
+       ✓ forwards the tool execution cancelSignal to callTool 0ms
+       ✓ returns text results on success 0ms
+       ✓ returns structured data results on success 0ms
+       ✓ provides default message for empty output 0ms
+       ✓ handles protocol-level errors 0ms
+       ✓ catches and wraps client exceptions 0ms
+       ✓ validates SDK response format 0ms
+       ✓ maps MCP image content to ImageBlock 0ms
+       ✓ falls back to JsonBlock for unsupported image mime type 0ms
+       ✓ falls back to JsonBlock for image content missing data 0ms
+       ✓ maps MCP text resource to TextBlock 0ms
+       ✓ maps MCP blob resource with image mime type to ImageBlock 0ms
+       ✓ falls back to JsonBlock for blob resource with non-image mime type 0ms
+       ✓ falls back to JsonBlock for resource with neither text nor blob 0ms
+       ✓ handles mixed content types in a single result 0ms
+       ✓ surfaces elicitation data for ProtocolError with code -32042 0ms
+       ✓ surfaces multiple elicitations for ProtocolError with code -32042 0ms
+       ✓ falls through to generic error for ProtocolError -32042 with malformed data 0ms
+       ✓ surfaces elicitation data for UrlElicitationRequiredError 0ms
+       ✓ falls through to generic error for ProtocolError -32042 with undefined data 0ms
+       ✓ falls through to generic error for ProtocolError -32042 with non-array elicitations 0ms
+       ✓ falls through to generic error for ProtocolError -32042 with empty elicitations 0ms
+       ✓ falls through to generic error for ProtocolError with a different code 0ms
+     ✓ returns undefined for all getters before connect 0ms
+     ✓ returns serverCapabilities after connect 0ms
+     ✓ returns serverVersion after connect 0ms
+     ✓ returns serverInstructions after connect 0ms
+     ✓ connectionState is disconnected before connect 0ms
+     ✓ connectionState is connected after successful connect 0ms
+     ✓ throws on connection failure by default 0ms
+     ✓ swallows connection failure when continueOnError is true 0ms
+     ✓ logs a warning when continueOnError swallows a connection failure 0ms
+     ✓ listTools returns empty array when continueOnError and connection failed 0ms
+     ✓ callTool throws when continueOnError and connection failed 0ms
+     ✓ does not retry connection on subsequent calls after continueOnError failure 0ms
+     ✓ recovers after explicit connect(true) when server comes back 0ms
+     ✓ routes debug level to logger.debug 0ms
+     ✓ routes info level to logger.info 0ms
+     ✓ routes notice level to logger.info 0ms
+     ✓ routes warning level to logger.warn 0ms
+     ✓ routes error level to logger.error 0ms
+     ✓ routes critical level to logger.error 0ms
+     ✓ routes alert level to logger.error 0ms
+     ✓ routes emergency level to logger.error 0ms
+     ✓ includes logger name and data in the message 0ms
+     ✓ calls custom logHandler when provided 0ms
+     ✓ constructs StreamableHTTPClientTransport when url is provided 1ms
+     ✓ constructs ClientCredentialsProvider when auth is provided 0ms
+     ✓ passes scopes as space-separated string 0ms
+     ✓ passes custom authProvider to transport 0ms
+     ✓ throws when both transport and url are provided 0ms
+     ✓ throws when neither transport nor url is provided 0ms
+     ✓ throws when auth is provided with transport 0ms
+     ✓ throws when both auth and authProvider are provided 0ms
+     ✓ accepts URL instance for url field 0ms
+     ✓ passes headers as requestInit to transport 0ms
+     ✓ passes both auth and headers to transport 0ms
+     ✓ throws when headers is provided with transport 0ms
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 3 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  |unit-node| src/mcp/__tests__/client.test.ts > MCP Integration > McpClient > keeps the connection shared after its creator aborts (continueOnError=false)
+ FAIL  |unit-node| src/mcp/__tests__/client.test.ts > MCP Integration > McpClient > keeps the connection shared after its creator aborts (continueOnError=true)
+AssertionError: expected "vi.fn()" to be called 1 times, but got 2 times
+ ❯ src/mcp/__tests__/client.test.ts:297:35
+    295|         await expect(creator).rejects.toBe(reason)
+    296|         const follower = abortableClient.connect()
+    297|         expect(sdkClient.connect).toHaveBeenCalledTimes(1)
+       |                                   ^
+    298|
+    299|         resolveConnect()
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/3]⎯
+
+ FAIL  |unit-node| src/mcp/__tests__/client.test.ts > MCP Integration > McpClient > releases a rejected connection after its creator aborts so an explicit retry can run
+AssertionError: promise resolved "undefined" instead of rejecting
+
+- Expected:
+Error {
+  "message": "rejected promise",
+}
+
++ Received:
+undefined
+
+ ❯ src/mcp/__tests__/client.test.ts:320:39
+    318|
+    319|       const follower = client.connect()
+    320|       const rejected = expect(follower).rejects.toBe(failure)
+       |                                       ^
+    321|       rejectConnect(failure)
+    322|       await rejected
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[2/3]⎯
+
+
+ Test Files  1 failed (1)
+      Tests  3 failed | 105 passed (108)
+Type Errors  no errors
+   Start at  00:31:30
+   Duration  920ms (transform 114ms, setup 52ms, import 171ms, tests 600ms, environment 0ms)
+
+JSON report written to <checkout>/strands-ts/test/.artifacts/test-report/json/report.json
+JUNIT report written to <checkout>/strands-ts/test/.artifacts/test-report/junit/report.xml

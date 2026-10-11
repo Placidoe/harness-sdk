@@ -1,0 +1,28 @@
+
+ RUN  v4.1.11 <checkout>/strands-ts
+
+ ❯ test/integ/mcp/mcp-connect-abort.test.node.ts (2 tests | 2 failed) 25ms
+       × shares the HTTP handshake and executes a tool (continueOnError=false) 21ms
+       × shares the HTTP handshake and executes a tool (continueOnError=true) 4ms
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 2 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  test/integ/mcp/mcp-connect-abort.test.node.ts > McpClient > connect with an aborted creator > shares the HTTP handshake and executes a tool (continueOnError=false)
+ FAIL  test/integ/mcp/mcp-connect-abort.test.node.ts > McpClient > connect with an aborted creator > shares the HTTP handshake and executes a tool (continueOnError=true)
+AssertionError: expected "connect" to be called 1 times, but got 2 times
+ ❯ test/integ/mcp/mcp-connect-abort.test.node.ts:56:27
+     54|           const follower = client.connect()
+     55|           void follower.catch(() => undefined)
+     56|           expect(connect).toHaveBeenCalledTimes(1)
+       |                           ^
+     57|           release()
+     58|           await expect(follower).resolves.toBeUndefined()
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/2]⎯
+
+
+ Test Files  1 failed (1)
+      Tests  2 failed (2)
+   Start at  00:31:32
+   Duration  272ms (transform 65ms, setup 0ms, import 162ms, tests 25ms, environment 0ms)
+

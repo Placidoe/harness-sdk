@@ -1,0 +1,2401 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>MCP connection cancellation — validation for #5045</title>
+<style>
+*{box-sizing:border-box}body{margin:0;background:#f4f6fa;color:#182434;font:16px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}main{max-width:1120px;margin:0 auto;padding:52px 36px}h1{font-size:38px;line-height:1.15;letter-spacing:-1.2px;margin:10px 0 18px}h2{font-size:23px;letter-spacing:-.4px;margin:0 0 15px}h3{font-size:17px;margin:20px 0 8px}p{margin:8px 0 15px}.eyebrow{color:#396396;font-size:13px;letter-spacing:1.5px;font-weight:650}section{margin:22px 0;padding:26px 30px;background:#fff;border:1px solid #dbe2ec;border-radius:16px}.muted{color:#5d6c7f}a{color:#285eae}code{font:13px/1.5 ui-monospace,SFMono-Regular,monospace;background:#edf1f6;padding:2px 5px;border-radius:4px}table{width:100%;border-collapse:collapse;font-size:15px}th,td{text-align:left;padding:11px 10px;border-bottom:1px solid #e4e9f1}th{font-size:12px;text-transform:uppercase;color:#5d6c7f;letter-spacing:.8px}.pass{color:#14704b;font-weight:650}.fail{color:#af3c31;font-weight:650}.warn{background:#fff4dd;border-color:#edd29a}.diagram{display:block;width:100%;height:auto}.columns{display:grid;grid-template-columns:1fr 1fr;gap:20px}.chip{display:inline-block;border-radius:30px;background:#eaf2ff;color:#285eae;padding:4px 12px;font-size:13px}pre{white-space:pre-wrap;overflow-wrap:anywhere;background:#101a2a;color:#d5e2f4;padding:22px;border-radius:12px;font:12px/1.55 ui-monospace,SFMono-Regular,monospace;max-height:390px;overflow:auto}details{border-top:1px solid #e4e9f1;padding-top:14px;margin-top:18px}summary{cursor:pointer;font-weight:600}footer{font-size:13px;color:#5d6c7f;margin-top:22px}@media(max-width:720px){main{padding:26px 16px}section{padding:20px}.columns{grid-template-columns:1fr}h1{font-size:30px}table{font-size:13px}}
+</style>
+</head>
+<body><main>
+<header><span class="eyebrow">STRANDS HARNESS SDK · ISSUE #5045</span><h1>Cancel the waiter.<br>Keep the shared connection alive.</h1><p class="muted">Technical solution and recorded local validation · 12 October 2026 (Asia/Shanghai)</p><span class="chip">Small lifetime fix · No public API change</span></header>
+<section id="overview"><h2>What broke, and why this fixes it</h2><p>The caller that starts an MCP connection can cancel its own wait. That does not cancel the underlying handshake. Previously, the caller's <code>finally</code> cleared the shared promise immediately, letting the next caller start a second connection on the same transport.</p><p>The patch clears that promise when the actual connection attempt settles, on success or failure. The identity guard remains in place so an older attempt cannot clear a newer one. The returned <code>finally</code> promise is still observed by the waiter or <code>raceWithAbort</code>; there is no detached rejection chain.</p>
+<svg class="diagram" viewBox="0 0 980 200" role="img" aria-label="Before: creator cancellation clears the shared slot and a follower starts a duplicate connection. After: cancellation leaves the shared slot intact until the handshake settles.">
+<defs><marker id="arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0 0L8 4L0 8" fill="#76879c"/></marker></defs>
+<g font-family="-apple-system,BlinkMacSystemFont,Segoe UI,sans-serif" font-size="14" fill="#182434"><text x="0" y="42" fill="#af3c31" font-weight="600">BEFORE</text><text x="0" y="140" fill="#14704b" font-weight="600">AFTER</text>
+<g fill="#fff0ed" stroke="#eac3bb"><rect x="92" y="14" width="190" height="64" rx="10"/><rect x="334" y="14" width="226" height="64" rx="10"/><rect x="616" y="14" width="340" height="64" rx="10"/></g>
+<text x="112" y="41">Creator cancels its wait</text><text x="112" y="61" font-size="12">Handshake still pending</text><text x="354" y="41">Shared slot cleared too early</text><text x="354" y="61" font-size="12">No single in-flight attempt</text><text x="636" y="41">Follower starts duplicate connection</text><text x="636" y="61" font-size="12">Same transport → failure / wedged state</text>
+<g fill="#eaf7f0" stroke="#b3d8c4"><rect x="92" y="111" width="190" height="64" rx="10"/><rect x="334" y="111" width="226" height="64" rx="10"/><rect x="616" y="111" width="340" height="64" rx="10"/></g>
+<text x="112" y="138">Creator cancels its wait</text><text x="112" y="158" font-size="12">Shared attempt is retained</text><text x="354" y="138">Follower joins that attempt</text><text x="354" y="158" font-size="12">Exactly one connection starts</text><text x="636" y="138">Handshake settles → release slot</text><text x="636" y="158" font-size="12">Success: tools work · Failure: error observed</text>
+<g stroke="#76879c" stroke-width="2" marker-end="url(#arrow)"><path d="M287 46H326"/><path d="M566 46H608"/><path d="M287 143H326"/><path d="M566 143H608"/></g></g></svg>
+</section>
+<section id="results"><h2>Same regression tests, before and after</h2><table><thead><tr><th>Check</th><th>Original behavior</th><th>Patched behavior</th></tr></thead><tbody>
+<tr><td>MCP Node unit suite</td><td class="fail">105 pass · 3 fail</td><td class="pass">108 pass</td></tr>
+<tr><td>Real delayed HTTP MCP handshake</td><td class="fail">2 fail · duplicate connect</td><td class="pass">2 pass · tools listed and executed</td></tr>
+<tr><td>MCP Chromium unit suite</td><td>Not run on original</td><td class="pass">108 pass</td></tr>
+<tr><td>Full Node unit suite</td><td>Not run on original</td><td class="pass">5,028 pass · 179 files</td></tr>
+<tr><td>Build / lint / format / type-check / browser bundle</td><td>Not run on original</td><td class="pass">Pass</td></tr></tbody></table><p class="muted">Statements: 93.26% · branches: 88.3% · functions: 95.74% · lines: 94.02%. Full-suite coverage, not patch-specific coverage.</p></section>
+<section class="warn"><h2>One gate is not green</h2><p><code>npm audit --audit-level=high</code> reports 5 existing dependency vulnerabilities (3 high, 2 moderate). The pre-push script exits 1 because of this audit, even though its other checks pass. This patch changes no dependency manifest or lockfile.</p><p>Full browser suite, package smoke tests, AWS/provider integration and Python <code>hatch run prepare</code> were not run. The Chromium result above is the focused MCP unit suite only. No model credentials were needed, and this is not a model-quality evaluation.</p></section>
+<section><h2>How the protocol check works</h2><div class="columns"><div><h3>Actual network boundary</h3><p>A real MCP server binds to a loopback HTTP port. The first request is held at a deterministic barrier. The creating caller aborts after that request arrives; a follower then joins before the barrier is released.</p><p>The real SDK <code>connect</code> method is spied on, not mocked. The test requires one invocation, then successfully lists and calls the server's <code>echo</code> tool.</p></div><div><h3>Edge cases and scope</h3><p>Both <code>continueOnError=false</code> and <code>true</code> are checked. A separate unit case checks a late connection rejection and explicit retry; that retry uses a mocked transport and does not establish recovery from every real transport failure.</p><p>Signal forwarding and tool metadata in #5043 are out of scope. General transport recreation after a failed handshake is also out of scope.</p></div></div></section>
+<section><h2>Reproduce</h2><p>Base: <code>38afb968e1f40aa47546ead09a22ec031bd345de</code> · macOS arm64 · Node 26.0.0 · npm 11.12.1. The baseline rerun used the same test sources with only the production fix temporarily reverted, then restored.</p><pre>npm ci
+# From strands-ts/:
+./node_modules/.bin/vitest run --project unit-node src/mcp/__tests__/client.test.ts --retry 0
+./node_modules/.bin/vitest run --project unit-browser src/mcp/__tests__/client.test.ts
+./node_modules/.bin/vitest run --config /absolute/path/to/mcp-vitest.config.ts
+# From the checkout root:
+bash .agents/skills/pre-push/run-checks.sh --base origin/main</pre><p>The standalone <a href="mcp-vitest.config.ts">protocol-test config</a> bypasses unrelated AWS global setup. Install the matching Chromium with <code>npm run test:browser:install</code> before running browser tests.</p></section>
+<section id="recorded-output"><h2>Recorded test output</h2><p class="muted">Actual command output; workstation paths redacted and ANSI colors removed. These are rendered log excerpts, not terminal screenshots.</p>
+<div class="columns"><div><h3>Before · real HTTP</h3><pre>
+ RUN  v4.1.11 &lt;checkout&gt;/strands-ts
+
+ ❯ test/integ/mcp/mcp-connect-abort.test.node.ts (2 tests | 2 failed) 25ms
+       × shares the HTTP handshake and executes a tool (continueOnError=false) 21ms
+       × shares the HTTP handshake and executes a tool (continueOnError=true) 4ms
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 2 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  test/integ/mcp/mcp-connect-abort.test.node.ts &gt; McpClient &gt; connect with an aborted creator &gt; shares the HTTP handshake and executes a tool (continueOnError=false)
+ FAIL  test/integ/mcp/mcp-connect-abort.test.node.ts &gt; McpClient &gt; connect with an aborted creator &gt; shares the HTTP handshake and executes a tool (continueOnError=true)
+AssertionError: expected "connect" to be called 1 times, but got 2 times
+ ❯ test/integ/mcp/mcp-connect-abort.test.node.ts:56:27
+     54|           const follower = client.connect()
+     55|           void follower.catch(() =&gt; undefined)
+     56|           expect(connect).toHaveBeenCalledTimes(1)
+       |                           ^
+     57|           release()
+     58|           await expect(follower).resolves.toBeUndefined()
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/2]⎯
+
+
+ Test Files  1 failed (1)
+      Tests  2 failed (2)
+   Start at  00:31:32
+   Duration  272ms (transform 65ms, setup 0ms, import 162ms, tests 25ms, environment 0ms)
+
+</pre></div><div><h3>After · real HTTP</h3><pre>
+ RUN  v4.1.11 &lt;checkout&gt;/strands-ts
+
+ ✓ test/integ/mcp/mcp-connect-abort.test.node.ts (2 tests) 58ms
+
+ Test Files  1 passed (1)
+      Tests  2 passed (2)
+   Start at  00:31:38
+   Duration  323ms (transform 64ms, setup 0ms, import 173ms, tests 58ms, environment 0ms)
+
+</pre></div></div>
+<details><summary>Node unit suite · original (3 failures)</summary><pre>Testing types with tsc and vue-tsc is an experimental feature.
+Breaking changes might not follow SemVer, please pin Vitest's version when using it.
+Testing types with tsc and vue-tsc is an experimental feature.
+Breaking changes might not follow SemVer, please pin Vitest's version when using it.
+
+ RUN  v4.1.11 &lt;checkout&gt;/strands-ts
+
+stderr | src/mcp/__tests__/client.test.ts &gt; MCP Integration &gt; McpClient &gt; passes args unchanged when context injection fails
+error=&lt;Error: Context error&gt; | failed to inject trace context into mcp tool call args
+
+stderr | src/mcp/__tests__/client.test.ts &gt; MCP Integration &gt; McpTool &gt; falls back to JsonBlock for unsupported image mime type
+mime_type=&lt;image/bmp&gt; | unsupported mcp image mime type, falling back to json
+
+stderr | src/mcp/__tests__/client.test.ts &gt; MCP Integration &gt; McpTool &gt; falls back to JsonBlock for image content missing data
+content_type=&lt;image&gt; | mcp image content missing data or mimeType, falling back to json
+
+stderr | src/mcp/__tests__/client.test.ts &gt; MCP Integration &gt; McpTool &gt; falls back to JsonBlock for blob resource with non-image mime type
+mime_type=&lt;application/pdf&gt; | unsupported mcp resource blob mime type, falling back to json
+
+stderr | src/mcp/__tests__/client.test.ts &gt; continueOnError &gt; swallows connection failure when continueOnError is true
+client=&lt;TestApp&gt;, error=&lt;Error: connection refused&gt; | MCP server failed to connect, continuing (continueOnError)
+
+stderr | src/mcp/__tests__/client.test.ts &gt; continueOnError &gt; listTools returns empty array when continueOnError and connection failed
+client=&lt;TestApp&gt;, error=&lt;Error: connection refused&gt; | MCP server failed to connect, continuing (continueOnError)
+
+stderr | src/mcp/__tests__/client.test.ts &gt; continueOnError &gt; callTool throws when continueOnError and connection failed
+client=&lt;TestApp&gt;, error=&lt;Error: connection refused&gt; | MCP server failed to connect, continuing (continueOnError)
+
+stderr | src/mcp/__tests__/client.test.ts &gt; continueOnError &gt; does not retry connection on subsequent calls after continueOnError failure
+client=&lt;TestApp&gt;, error=&lt;Error: connection refused&gt; | MCP server failed to connect, continuing (continueOnError)
+
+stderr | src/mcp/__tests__/client.test.ts &gt; continueOnError &gt; recovers after explicit connect(true) when server comes back
+client=&lt;TestApp&gt;, error=&lt;Error: connection refused&gt; | MCP server failed to connect, continuing (continueOnError)
+
+ ❯ |unit-node| src/mcp/__tests__/client.test.ts (108 tests | 3 failed) 600ms
+       ✓ initializes SDK client with correct configuration 2ms
+       ✓ injects trace context into tool arguments when active span exists 1ms
+       ✓ merges trace context with existing _meta field 0ms
+       ✓ passes args unchanged when no active span exists 0ms
+       ✓ passes args unchanged when span has empty trace ID 0ms
+       ✓ passes args unchanged when context injection fails 0ms
+       ✓ skips trace context injection when disableMcpInstrumentation is true 0ms
+       ✓ manages connection state lazily 0ms
+       ✓ supports forced reconnection 0ms
+       ✓ stops a caller waiting on a shared connection when its signal aborts 1ms
+       × keeps the connection shared after its creator aborts (continueOnError=false) 2ms
+       × keeps the connection shared after its creator aborts (continueOnError=true) 0ms
+       × releases a rejected connection after its creator aborts so an explicit retry can run 1ms
+       ✓ rejects immediately when connect is called with an aborted signal 0ms
+       ✓ converts SDK tool specs to McpTool instances 0ms
+       ✓ matches strings and regexes against the server-side name and passes the renamed tool to callbacks 0ms
+       ✓ applies allowed before rejected with rejected winning and distinguishes missing from empty allowed 0ms
+       ✓ inherits constructor defaults while explicit empty prefix and filters disable them 0ms
+       ✓ filters and prefixes SDK results and invokes tools by the server-side name 0ms
+       ✓ skips overlong names in listed tools and preserves the 64-character boundary 1ms
+       ✓ throws an actionable error with continueOnError=undefined 0ms
+       ✓ throws an actionable error with continueOnError=false 0ms
+       ✓ surfaces tool annotations in the tool spec 0ms
+       ✓ omits annotations from the tool spec when the server provides none 0ms
+       ✓ omits annotations from the tool spec when the server provides an empty annotations object 0ms
+       ✓ generates description fallback when description is missing 0ms
+       ✓ generates description fallback when description is empty string 0ms
+       ✓ calls the tool with no request options by default 0ms
+       ✓ forwards abort signal to SDK callTool 1ms
+       ✓ still lists tools when tasksConfig is set 0ms
+       ✓ validates tool arguments 0ms
+       ✓ cleans up resources 0ms
+       ✓ supports Symbol.asyncDispose for await using pattern 0ms
+       ✓ registers elicitation handler before connecting when callback is provided 0ms
+       ✓ does not register elicitation handler when no callback is provided 0ms
+       ✓ passes elicitation capabilities to Client when callback is provided 0ms
+       ✓ elicitation handler returns accepted result with content and exposes the abort signal at mcpReq.signal 0ms
+       ✓ elicitation handler returns 'decline' result 0ms
+       ✓ elicitation handler returns 'cancel' result 0ms
+       ✓ elicitation handler works for URL mode params 1ms
+       ✓ elicitation callback errors propagate 0ms
+       ✓ calls onToolsChanged with old names and new tools when list changes 154ms
+       ✓ updates registered tool names after each listTools call 52ms
+       ✓ keeps default registered names after an overridden listing 51ms
+       ✓ reapplies constructor filters and prefix when refreshing 51ms
+       ✓ does not throw when onToolsChanged is not set 2ms
+       ✓ logs warning and preserves registry when listTools fails during refresh (request) 103ms
+       ✓ logs warning and preserves registry when listTools fails during refresh (name length) 101ms
+       ✓ coalesces notifications received during an in-flight refresh into one extra refresh 52ms
+       ✓ exposes the original client without allowing reassignment 1ms
+       ✓ forwards the tool execution cancelSignal to callTool 0ms
+       ✓ returns text results on success 0ms
+       ✓ returns structured data results on success 0ms
+       ✓ provides default message for empty output 0ms
+       ✓ handles protocol-level errors 0ms
+       ✓ catches and wraps client exceptions 0ms
+       ✓ validates SDK response format 0ms
+       ✓ maps MCP image content to ImageBlock 0ms
+       ✓ falls back to JsonBlock for unsupported image mime type 0ms
+       ✓ falls back to JsonBlock for image content missing data 0ms
+       ✓ maps MCP text resource to TextBlock 0ms
+       ✓ maps MCP blob resource with image mime type to ImageBlock 0ms
+       ✓ falls back to JsonBlock for blob resource with non-image mime type 0ms
+       ✓ falls back to JsonBlock for resource with neither text nor blob 0ms
+       ✓ handles mixed content types in a single result 0ms
+       ✓ surfaces elicitation data for ProtocolError with code -32042 0ms
+       ✓ surfaces multiple elicitations for ProtocolError with code -32042 0ms
+       ✓ falls through to generic error for ProtocolError -32042 with malformed data 0ms
+       ✓ surfaces elicitation data for UrlElicitationRequiredError 0ms
+       ✓ falls through to generic error for ProtocolError -32042 with undefined data 0ms
+       ✓ falls through to generic error for ProtocolError -32042 with non-array elicitations 0ms
+       ✓ falls through to generic error for ProtocolError -32042 with empty elicitations 0ms
+       ✓ falls through to generic error for ProtocolError with a different code 0ms
+     ✓ returns undefined for all getters before connect 0ms
+     ✓ returns serverCapabilities after connect 0ms
+     ✓ returns serverVersion after connect 0ms
+     ✓ returns serverInstructions after connect 0ms
+     ✓ connectionState is disconnected before connect 0ms
+     ✓ connectionState is connected after successful connect 0ms
+     ✓ throws on connection failure by default 0ms
+     ✓ swallows connection failure when continueOnError is true 0ms
+     ✓ logs a warning when continueOnError swallows a connection failure 0ms
+     ✓ listTools returns empty array when continueOnError and connection failed 0ms
+     ✓ callTool throws when continueOnError and connection failed 0ms
+     ✓ does not retry connection on subsequent calls after continueOnError failure 0ms
+     ✓ recovers after explicit connect(true) when server comes back 0ms
+     ✓ routes debug level to logger.debug 0ms
+     ✓ routes info level to logger.info 0ms
+     ✓ routes notice level to logger.info 0ms
+     ✓ routes warning level to logger.warn 0ms
+     ✓ routes error level to logger.error 0ms
+     ✓ routes critical level to logger.error 0ms
+     ✓ routes alert level to logger.error 0ms
+     ✓ routes emergency level to logger.error 0ms
+     ✓ includes logger name and data in the message 0ms
+     ✓ calls custom logHandler when provided 0ms
+     ✓ constructs StreamableHTTPClientTransport when url is provided 1ms
+     ✓ constructs ClientCredentialsProvider when auth is provided 0ms
+     ✓ passes scopes as space-separated string 0ms
+     ✓ passes custom authProvider to transport 0ms
+     ✓ throws when both transport and url are provided 0ms
+     ✓ throws when neither transport nor url is provided 0ms
+     ✓ throws when auth is provided with transport 0ms
+     ✓ throws when both auth and authProvider are provided 0ms
+     ✓ accepts URL instance for url field 0ms
+     ✓ passes headers as requestInit to transport 0ms
+     ✓ passes both auth and headers to transport 0ms
+     ✓ throws when headers is provided with transport 0ms
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 3 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  |unit-node| src/mcp/__tests__/client.test.ts &gt; MCP Integration &gt; McpClient &gt; keeps the connection shared after its creator aborts (continueOnError=false)
+ FAIL  |unit-node| src/mcp/__tests__/client.test.ts &gt; MCP Integration &gt; McpClient &gt; keeps the connection shared after its creator aborts (continueOnError=true)
+AssertionError: expected "vi.fn()" to be called 1 times, but got 2 times
+ ❯ src/mcp/__tests__/client.test.ts:297:35
+    295|         await expect(creator).rejects.toBe(reason)
+    296|         const follower = abortableClient.connect()
+    297|         expect(sdkClient.connect).toHaveBeenCalledTimes(1)
+       |                                   ^
+    298|
+    299|         resolveConnect()
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/3]⎯
+
+ FAIL  |unit-node| src/mcp/__tests__/client.test.ts &gt; MCP Integration &gt; McpClient &gt; releases a rejected connection after its creator aborts so an explicit retry can run
+AssertionError: promise resolved "undefined" instead of rejecting
+
+- Expected:
+Error {
+  "message": "rejected promise",
+}
+
++ Received:
+undefined
+
+ ❯ src/mcp/__tests__/client.test.ts:320:39
+    318|
+    319|       const follower = client.connect()
+    320|       const rejected = expect(follower).rejects.toBe(failure)
+       |                                       ^
+    321|       rejectConnect(failure)
+    322|       await rejected
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[2/3]⎯
+
+
+ Test Files  1 failed (1)
+      Tests  3 failed | 105 passed (108)
+Type Errors  no errors
+   Start at  00:31:30
+   Duration  920ms (transform 114ms, setup 52ms, import 171ms, tests 600ms, environment 0ms)
+
+JSON report written to &lt;checkout&gt;/strands-ts/test/.artifacts/test-report/json/report.json
+JUNIT report written to &lt;checkout&gt;/strands-ts/test/.artifacts/test-report/junit/report.xml
+</pre></details>
+<details><summary>Node unit suite · patched (108 pass)</summary><pre>Testing types with tsc and vue-tsc is an experimental feature.
+Breaking changes might not follow SemVer, please pin Vitest's version when using it.
+Testing types with tsc and vue-tsc is an experimental feature.
+Breaking changes might not follow SemVer, please pin Vitest's version when using it.
+
+ RUN  v4.1.11 &lt;checkout&gt;/strands-ts
+
+stderr | src/mcp/__tests__/client.test.ts &gt; MCP Integration &gt; McpClient &gt; passes args unchanged when context injection fails
+error=&lt;Error: Context error&gt; | failed to inject trace context into mcp tool call args
+
+stderr | src/mcp/__tests__/client.test.ts &gt; MCP Integration &gt; McpTool &gt; falls back to JsonBlock for unsupported image mime type
+mime_type=&lt;image/bmp&gt; | unsupported mcp image mime type, falling back to json
+
+stderr | src/mcp/__tests__/client.test.ts &gt; MCP Integration &gt; McpTool &gt; falls back to JsonBlock for image content missing data
+content_type=&lt;image&gt; | mcp image content missing data or mimeType, falling back to json
+
+stderr | src/mcp/__tests__/client.test.ts &gt; MCP Integration &gt; McpTool &gt; falls back to JsonBlock for blob resource with non-image mime type
+mime_type=&lt;application/pdf&gt; | unsupported mcp resource blob mime type, falling back to json
+
+stderr | src/mcp/__tests__/client.test.ts &gt; continueOnError &gt; swallows connection failure when continueOnError is true
+client=&lt;TestApp&gt;, error=&lt;Error: connection refused&gt; | MCP server failed to connect, continuing (continueOnError)
+
+stderr | src/mcp/__tests__/client.test.ts &gt; continueOnError &gt; listTools returns empty array when continueOnError and connection failed
+client=&lt;TestApp&gt;, error=&lt;Error: connection refused&gt; | MCP server failed to connect, continuing (continueOnError)
+
+stderr | src/mcp/__tests__/client.test.ts &gt; continueOnError &gt; callTool throws when continueOnError and connection failed
+client=&lt;TestApp&gt;, error=&lt;Error: connection refused&gt; | MCP server failed to connect, continuing (continueOnError)
+
+stderr | src/mcp/__tests__/client.test.ts &gt; continueOnError &gt; does not retry connection on subsequent calls after continueOnError failure
+client=&lt;TestApp&gt;, error=&lt;Error: connection refused&gt; | MCP server failed to connect, continuing (continueOnError)
+
+stderr | src/mcp/__tests__/client.test.ts &gt; continueOnError &gt; recovers after explicit connect(true) when server comes back
+client=&lt;TestApp&gt;, error=&lt;Error: connection refused&gt; | MCP server failed to connect, continuing (continueOnError)
+
+ ✓ |unit-node| src/mcp/__tests__/client.test.ts (108 tests) 594ms
+
+ Test Files  1 passed (1)
+      Tests  108 passed (108)
+Type Errors  no errors
+   Start at  00:31:36
+   Duration  860ms (transform 96ms, setup 41ms, import 132ms, tests 594ms, environment 0ms)
+
+JSON report written to &lt;checkout&gt;/strands-ts/test/.artifacts/test-report/json/report.json
+JUNIT report written to &lt;checkout&gt;/strands-ts/test/.artifacts/test-report/junit/report.xml
+</pre></details>
+<details><summary>Chromium MCP suite · patched (108 pass)</summary><pre>Testing types with tsc and vue-tsc is an experimental feature.
+Breaking changes might not follow SemVer, please pin Vitest's version when using it.
+
+ RUN  v4.1.11 &lt;checkout&gt;/strands-ts
+
+12:29:00 AM [vite] (client) [console.warn] error=&lt;Error: Context error&gt; | failed to inject trace context into mcp tool call args
+stderr | src/mcp/__tests__/client.test.ts &gt; MCP Integration &gt; McpClient &gt; passes args unchanged when context injection fails
+error=&lt;Error: Context error&gt; | failed to inject trace context into mcp tool call args
+12:29:00 AM [vite] (client) [console.warn] mime_type=&lt;image/bmp&gt; | unsupported mcp image mime type, falling back to json
+12:29:00 AM [vite] (client) [console.warn] content_type=&lt;image&gt; | mcp image content missing data or mimeType, falling back to json
+stderr | src/mcp/__tests__/client.test.ts &gt; MCP Integration &gt; McpTool &gt; falls back to JsonBlock for unsupported image mime type
+mime_type=&lt;image/bmp&gt; | unsupported mcp image mime type, falling back to json
+stderr | src/mcp/__tests__/client.test.ts &gt; MCP Integration &gt; McpTool &gt; falls back to JsonBlock for image content missing data
+content_type=&lt;image&gt; | mcp image content missing data or mimeType, falling back to json
+12:29:00 AM [vite] (client) [console.warn] mime_type=&lt;application/pdf&gt; | unsupported mcp resource blob mime type, falling back to json
+stderr | src/mcp/__tests__/client.test.ts &gt; MCP Integration &gt; McpTool &gt; falls back to JsonBlock for blob resource with non-image mime type
+mime_type=&lt;application/pdf&gt; | unsupported mcp resource blob mime type, falling back to json
+12:29:00 AM [vite] (client) [console.warn] client=&lt;TestApp&gt;, error=&lt;Error: connection refused&gt; | MCP server failed to connect, continuing (continueOnError)
+stderr | src/mcp/__tests__/client.test.ts &gt; continueOnError &gt; swallows connection failure when continueOnError is true
+client=&lt;TestApp&gt;, error=&lt;Error: connection refused&gt; | MCP server failed to connect, continuing (continueOnError)
+12:29:00 AM [vite] (client) [console.warn] client=&lt;TestApp&gt;, error=&lt;Error: connection refused&gt; | MCP server failed to connect, continuing (continueOnError)
+stderr | src/mcp/__tests__/client.test.ts &gt; continueOnError &gt; listTools returns empty array when continueOnError and connection failed
+client=&lt;TestApp&gt;, error=&lt;Error: connection refused&gt; | MCP server failed to connect, continuing (continueOnError)
+12:29:00 AM [vite] (client) [console.warn] client=&lt;TestApp&gt;, error=&lt;Error: connection refused&gt; | MCP server failed to connect, continuing (continueOnError)
+stderr | src/mcp/__tests__/client.test.ts &gt; continueOnError &gt; callTool throws when continueOnError and connection failed
+client=&lt;TestApp&gt;, error=&lt;Error: connection refused&gt; | MCP server failed to connect, continuing (continueOnError)
+stderr | src/mcp/__tests__/client.test.ts &gt; continueOnError &gt; does not retry connection on subsequent calls after continueOnError failure
+client=&lt;TestApp&gt;, error=&lt;Error: connection refused&gt; | MCP server failed to connect, continuing (continueOnError)
+12:29:00 AM [vite] (client) [console.warn] client=&lt;TestApp&gt;, error=&lt;Error: connection refused&gt; | MCP server failed to connect, continuing (continueOnError)
+12:29:00 AM [vite] (client) [console.warn] client=&lt;TestApp&gt;, error=&lt;Error: connection refused&gt; | MCP server failed to connect, continuing (continueOnError)
+stderr | src/mcp/__tests__/client.test.ts &gt; continueOnError &gt; recovers after explicit connect(true) when server comes back
+client=&lt;TestApp&gt;, error=&lt;Error: connection refused&gt; | MCP server failed to connect, continuing (continueOnError)
+ ✓ |unit-browser (chromium)| src/mcp/__tests__/client.test.ts (108 tests) 590ms
+
+ Test Files  1 passed (1)
+      Tests  108 passed (108)
+   Start at  00:28:54
+   Duration  5.94s (transform 0ms, setup 0ms, import 193ms, tests 590ms, environment 0ms)
+
+JSON report written to &lt;checkout&gt;/strands-ts/test/.artifacts/test-report/json/report.json
+JUNIT report written to &lt;checkout&gt;/strands-ts/test/.artifacts/test-report/junit/report.xml
+</pre></details>
+<details><summary>Full pre-push output · audit failure disclosed</summary><pre>Base:          origin/main (38afb968e)
+Detected areas:
+  - typescript
+
+### PHASE 1: auto-fix ###
+
+=== typescript ===
+
+  fix: format (prettier --write, scoped)
+src/mcp/__tests__/client.test.ts 92ms (unchanged)
+src/mcp/client.ts 34ms (unchanged)
+test/integ/mcp/mcp-connect-abort.test.node.ts 4ms (unchanged)
+
+  fix: lint autofix (eslint --fix, scoped)
+
+### PHASE 2: check ###
+
+=== typescript ===
+
+  &gt; build (npm run build)
+
+&gt; strands@0.0.0 build
+&gt; npm run build -w strands-ts
+
+
+&gt; @strands-agents/sdk@0.0.1-development build
+&gt; tsc --project src/tsconfig.json
+
+
+  &gt; lint (npm run lint)
+
+&gt; strands@0.0.0 lint
+&gt; npm run lint -w strands-ts
+
+
+&gt; @strands-agents/sdk@0.0.1-development lint
+&gt; eslint src test/integ
+
+
+  &gt; format check (npm run format:check)
+
+&gt; strands@0.0.0 format:check
+&gt; npm run format:check -w strands-ts
+
+
+&gt; @strands-agents/sdk@0.0.1-development format:check
+&gt; prettier --check src test/integ
+
+Checking formatting...
+All matched files use Prettier code style!
+
+  &gt; type-check (npm run type-check)
+
+&gt; strands@0.0.0 type-check
+&gt; npm run type-check -w strands-ts
+
+
+&gt; @strands-agents/sdk@0.0.1-development type-check
+&gt; tsc --noEmit --project src/tsconfig.json &amp;&amp; tsc --noEmit --project test/integ/tsconfig.json
+
+
+  &gt; browser bundle (npm run check:browser-bundle)
+
+&gt; strands@0.0.0 check:browser-bundle
+&gt; npm run check:browser-bundle -w strands-ts
+
+
+&gt; @strands-agents/sdk@0.0.1-development check:browser-bundle
+&gt; esbuild src/index.ts --bundle --platform=browser --format=esm --packages=external --outfile=/dev/null
+
+
+  ../../../../../../../../../dev/null  706.1kb
+
+⚡ Done in 47ms
+
+  &gt; npm audit (--audit-level=high)
+# npm audit report
+
+@modelcontextprotocol/client  2.0.0 - 2.1.0
+Severity: high
+MCP TypeScript SDK: OAuth client could send credentials to an authorization server chosen by the MCP server - https://github.com/advisories/GHSA-6qxp-vccf-f47h
+fix available via `npm audit fix`
+node_modules/@modelcontextprotocol/client
+
+@modelcontextprotocol/sdk  1.12.0 - 1.30.1
+Severity: high
+MCP TypeScript SDK: OAuth client could send credentials to an authorization server chosen by the MCP server - https://github.com/advisories/GHSA-6qxp-vccf-f47h
+fix available via `npm audit fix`
+node_modules/@modelcontextprotocol/sdk
+
+nanoid  &lt;3.3.18
+Severity: high
+nanoid: custom generators can loop indefinitely when size is zero - https://github.com/advisories/GHSA-2v37-7h3g-55p8
+fix available via `npm audit fix`
+node_modules/nanoid
+
+protobufjs  7.5.0 - 7.6.4
+Severity: moderate
+protobufjs: Denial of Service via infinite loop in .proto option parsing - https://github.com/advisories/GHSA-j3f2-48v5-ccww
+fix available via `npm audit fix`
+node_modules/protobufjs
+
+qs  2.2.5 - 6.15.3
+Severity: moderate
+qs array-limit bypass via bracket-key comma parsing - https://github.com/advisories/GHSA-x5fp-wj9c-mxmx
+qs: Denial of Service via Attacker Controlled isBuffer - https://github.com/advisories/GHSA-4mjr-xmp4-gh2g
+fix available via `npm audit fix`
+node_modules/qs
+
+5 vulnerabilities (2 moderate, 3 high)
+
+To address all issues, run:
+  npm audit fix
+  FAILED: npm audit (--audit-level=high)
+
+  &gt; unit tests + coverage (npm run test:coverage)
+
+&gt; strands@0.0.0 test:coverage
+&gt; npm run test:coverage -w strands-ts
+
+
+&gt; @strands-agents/sdk@0.0.1-development test:coverage
+&gt; vitest run --coverage --project unit-node
+
+Testing types with tsc and vue-tsc is an experimental feature.
+Breaking changes might not follow SemVer, please pin Vitest's version when using it.
+Testing types with tsc and vue-tsc is an experimental feature.
+Breaking changes might not follow SemVer, please pin Vitest's version when using it.
+
+ RUN  v4.1.11 &lt;checkout&gt;/strands-ts
+      Coverage enabled with v8
+
+ ✓ |unit-node| src/sandbox/__tests__/not-a-sandbox-local-environment.test.node.ts (18 tests) 198ms
+stderr | src/mcp/__tests__/client.test.ts &gt; MCP Integration &gt; McpClient &gt; passes args unchanged when context injection fails
+error=&lt;Error: Context error&gt; | failed to inject trace context into mcp tool call args
+
+stderr | src/models/__tests__/bedrock.test.ts &gt; BedrockModel &gt; stream &gt; handles reasoning content delta with only text, skips unsupported types
+delta_key=&lt;unknown&gt; | skipping unsupported delta key
+
+stderr | src/models/__tests__/bedrock.test.ts &gt; BedrockModel &gt; stream &gt; handles reasoning content delta with only text, skips unsupported types
+event_type=&lt;unknown&gt; | unsupported bedrock event type
+
+stderr | src/models/__tests__/bedrock.test.ts &gt; BedrockModel &gt; stream &gt; handles all stop reason types &gt; handles model_context_window_exceeded stop reason types
+stop_reason=&lt;model_context_window_exceeded&gt;, fallback=&lt;modelContextWindowExceeded&gt; | unknown stop reason, converting to camelCase
+
+stderr | src/models/__tests__/bedrock.test.ts &gt; BedrockModel &gt; stream &gt; handles all stop reason types &gt; handles new_stop_reason stop reason types
+stop_reason=&lt;new_stop_reason&gt;, fallback=&lt;newStopReason&gt; | unknown stop reason, converting to camelCase
+
+stderr | src/models/__tests__/bedrock.test.ts &gt; BedrockModel &gt; system prompt formatting &gt; replaces a leading caller-placed cache point with automatic placement
+msg_idx=&lt;0&gt; | removed cache point with no content ahead of it, falling back to automatic placement
+
+stderr | src/models/__tests__/bedrock.test.ts &gt; BedrockModel &gt; system prompt formatting &gt; leaves a message that was only a cache point empty
+msg_idx=&lt;0&gt; | removed cache point with no content ahead of it, falling back to automatic placement
+
+stderr | src/models/__tests__/bedrock.test.ts &gt; BedrockModel &gt; system prompt formatting &gt; keeps only the first of three cache points, and gives it the configured ttl
+msg_idx=&lt;0&gt;, block_idx=&lt;5&gt; | stripped existing cache point (auto mode manages cache points)
+msg_idx=&lt;0&gt;, block_idx=&lt;3&gt; | stripped existing cache point (auto mode manages cache points)
+
+stderr | src/models/__tests__/bedrock.test.ts &gt; BedrockModel &gt; system prompt formatting &gt; still strips cache points in earlier messages
+msg_idx=&lt;0&gt;, block_idx=&lt;1&gt; | stripped existing cache point (auto mode manages cache points)
+
+stderr | src/models/__tests__/bedrock.test.ts &gt; BedrockModel &gt; system prompt formatting &gt; drops an honored cache point when a non-PDF document leads the message
+msg_idx=&lt;0&gt; | dropped cache point ahead of a leading document
+
+stderr | src/models/__tests__/bedrock.test.ts &gt; BedrockModel &gt; system prompt formatting &gt; cache sections &gt; leaves a system cache point alone when the model does not support caching
+model_id=&lt;meta.llama3-70b-instruct-v1:0&gt; | cache_config is enabled but this model does not support automatic caching
+model_id=&lt;meta.llama3-70b-instruct-v1:0&gt; | cache_config is enabled but this model does not support automatic caching
+model_id=&lt;meta.llama3-70b-instruct-v1:0&gt; | cache_config is enabled but this model does not support automatic caching
+model_id=&lt;meta.llama3-70b-instruct-v1:0&gt; | cache_config is enabled but this model does not support automatic caching
+
+stderr | src/telemetry/__tests__/config.test.ts &gt; setupTracer &gt; singleton behavior &gt; should return the same provider instance when called twice
+tracer provider already initialized, returning existing provider
+
+stderr | src/telemetry/__tests__/config.test.ts &gt; setupTracer &gt; singleton behavior &gt; should log a warning when called twice
+tracer provider already initialized, returning existing provider
+
+stderr | src/telemetry/__tests__/config.test.ts &gt; setupMeter &gt; singleton behavior &gt; returns the same provider instance when called twice
+meter provider already initialized, returning existing provider
+
+stderr | src/telemetry/__tests__/config.test.ts &gt; setupMeter &gt; singleton behavior &gt; logs a warning when called twice
+meter provider already initialized, returning existing provider
+
+ ✓ |unit-node| src/session/__tests__/file-storage.test.node.ts (26 tests) 237ms
+ ✓ |unit-node| src/telemetry/__tests__/config.test.ts (6 tests) 292ms
+ ✓ |unit-node| src/mcp/__tests__/task-client-stdio.test.node.ts (1 test) 169ms
+stderr | src/models/__tests__/bedrock.test.ts &gt; BedrockModel &gt; system prompt formatting &gt; logs warning and disables caching for non-caching models
+model_id=&lt;amazon.titan-text-express-v1&gt; | cache_config is enabled but this model does not support automatic caching
+model_id=&lt;amazon.titan-text-express-v1&gt; | cache_config is enabled but this model does not support automatic caching
+model_id=&lt;amazon.titan-text-express-v1&gt; | cache_config is enabled but this model does not support automatic caching
+
+ ✓ |unit-node| src/models/__tests__/bedrock.test.ts (260 tests) 200ms
+ ✓ |unit-node| src/vended-memory-stores/test-memory-store/__tests__/test-memory-store.test.node.ts (36 tests) 141ms
+ ✓ |unit-node| src/storage/__tests__/local-file-storage.test.node.ts (19 tests) 72ms
+stderr | src/mcp/__tests__/task-client.test.ts &gt; McpClient SEP-2663 task execution &gt; fails fast when the elicitation callback returns a malformed response
+client=&lt;task-test-client&gt;, error=&lt;SdkError: MCP elicitation callback returned a malformed response&gt; | mcp task session error
+
+stderr | src/vended-plugins/skills/__tests__/agent-skills.test.node.ts &gt; AgentSkills &gt; constructor &gt; warns on duplicate names and keeps the last
+name=&lt;dup&gt; | duplicate skill name, overwriting previous skill
+
+stderr | src/vended-plugins/skills/__tests__/skill.test.node.ts &gt; Skill &gt; fromContent &gt; warns but does not throw for invalid name in lenient mode
+name=&lt;INVALID_NAME&gt; | skill name should be 1-64 lowercase alphanumeric characters or hyphens, should not start/end with hyphen
+
+stderr | src/vended-plugins/skills/__tests__/agent-skills.test.node.ts &gt; AgentSkills &gt; constructor &gt; gracefully handles a path with malformed SKILL.md
+path=&lt;/var/folders/d_/wgsw734x7bzg2jyp3tx4jyk80000gn/T/agent-skills-test-1791735587346-vk5gbewu6u7/bad-skill&gt; | failed to load skill: Error: SKILL.md must start with --- frontmatter delimiter
+
+stderr | src/vended-plugins/skills/__tests__/agent-skills.test.node.ts &gt; AgentSkills &gt; constructor &gt; gracefully handles a path with malformed SKILL.md
+no skills were loaded, the agent will have no skills available
+
+stderr | src/vended-plugins/skills/__tests__/agent-skills.test.node.ts &gt; AgentSkills &gt; constructor &gt; loads valid skills from a parent dir containing malformed siblings
+path=&lt;/var/folders/d_/wgsw734x7bzg2jyp3tx4jyk80000gn/T/agent-skills-test-1791735587349-d66os515ur6/bad-skill&gt; | failed to load skill: Error: SKILL.md must start with --- frontmatter delimiter
+
+ ✓ |unit-node| src/mcp/__tests__/task-client.test.ts (35 tests) 406ms
+stderr | src/vended-plugins/skills/__tests__/skill.test.node.ts &gt; Skill &gt; fromFile &gt; warns when skill name does not match directory name
+name=&lt;actual-skill-name&gt;, directory=&lt;wrong-dir-name&gt; | skill name does not match parent directory name
+
+stderr | src/vended-plugins/skills/__tests__/agent-skills.test.node.ts &gt; AgentSkills &gt; system prompt injection &gt; shows "no skills available" when empty
+no skills were loaded, the agent will have no skills available
+
+stderr | src/vended-plugins/skills/__tests__/skill.test.node.ts &gt; Skill &gt; fromDirectory &gt; skips skills with invalid content
+path=&lt;/var/folders/d_/wgsw734x7bzg2jyp3tx4jyk80000gn/T/skill-test-1791735587391-lg103gvrax/bad-skill&gt; | skipping skill due to error: Error: SKILL.md content must have a 'name' field in frontmatter
+
+ ✓ |unit-node| src/vended-tools/http-request/__tests__/http-request.test.ts (18 tests) 114ms
+stderr | src/vended-plugins/skills/__tests__/skill.test.node.ts &gt; Skill &gt; fromDirectory &gt; skips skills with completely broken SKILL.md (no frontmatter)
+path=&lt;/var/folders/d_/wgsw734x7bzg2jyp3tx4jyk80000gn/T/skill-test-1791735587400-n4ilozqput/broken-skill&gt; | skipping skill due to error: Error: SKILL.md must start with --- frontmatter delimiter
+
+stderr | src/vended-plugins/skills/__tests__/agent-skills.test.node.ts &gt; AgentSkills &gt; URL skill resolution &gt; skips a failed URL fetch gracefully
+url=&lt;https://example.com/broken/SKILL.md&gt; | failed to load skill from URL: Error: url=&lt;https://example.com/broken/SKILL.md&gt; | HTTP 404: Not Found
+
+stderr | src/vended-plugins/skills/__tests__/agent-skills.test.node.ts &gt; AgentSkills &gt; URL skill resolution &gt; skips a failed URL fetch gracefully
+no skills were loaded, the agent will have no skills available
+
+stderr | src/vended-plugins/skills/__tests__/agent-skills.test.node.ts &gt; AgentSkills &gt; URL skill resolution &gt; warns on duplicate skill names from URLs
+name=&lt;url-skill&gt; | duplicate skill name, overwriting previous skill
+
+ ✓ |unit-node| src/vended-plugins/skills/__tests__/skill.test.node.ts (46 tests) 94ms
+ ✓ |unit-node| src/vended-plugins/skills/__tests__/agent-skills.test.node.ts (39 tests) 111ms
+ ✓ |unit-node| src/vended-plugins/context-offloader/__tests__/plugin.test.node.ts (1 test) 390ms
+     ✓ isolates a shared storage config by agent sandbox  389ms
+(node:57121) MaxListenersExceededWarning: Possible EventEmitter memory leak detected. 11 beforeExit listeners added to [process]. MaxListeners is 10. Use emitter.setMaxListeners() to increase limit
+(Use `node --trace-warnings ...` to show where the warning was created)
+stderr | src/multiagent/__tests__/swarm.test.ts &gt; Swarm &gt; constructor &gt; defaults id to "swarm"
+swarm has no maxSteps or timeout set; execution is unbounded
+
+ ✓ |unit-node| src/telemetry/__tests__/config.test.node.ts (15 tests) 108ms
+stderr | src/multiagent/__tests__/graph.test.ts &gt; Graph &gt; constructor &gt; defaults id to "graph"
+graph has no maxSteps or timeout set; execution is unbounded
+
+stderr | src/mcp/__tests__/client.test.ts &gt; MCP Integration &gt; McpTool &gt; falls back to JsonBlock for unsupported image mime type
+mime_type=&lt;image/bmp&gt; | unsupported mcp image mime type, falling back to json
+
+stderr | src/mcp/__tests__/client.test.ts &gt; MCP Integration &gt; McpTool &gt; falls back to JsonBlock for image content missing data
+content_type=&lt;image&gt; | mcp image content missing data or mimeType, falling back to json
+
+stderr | src/mcp/__tests__/client.test.ts &gt; MCP Integration &gt; McpTool &gt; falls back to JsonBlock for blob resource with non-image mime type
+mime_type=&lt;application/pdf&gt; | unsupported mcp resource blob mime type, falling back to json
+
+stderr | src/mcp/__tests__/client.test.ts &gt; continueOnError &gt; swallows connection failure when continueOnError is true
+client=&lt;TestApp&gt;, error=&lt;Error: connection refused&gt; | MCP server failed to connect, continuing (continueOnError)
+
+stderr | src/mcp/__tests__/client.test.ts &gt; continueOnError &gt; listTools returns empty array when continueOnError and connection failed
+client=&lt;TestApp&gt;, error=&lt;Error: connection refused&gt; | MCP server failed to connect, continuing (continueOnError)
+
+stderr | src/mcp/__tests__/client.test.ts &gt; continueOnError &gt; callTool throws when continueOnError and connection failed
+client=&lt;TestApp&gt;, error=&lt;Error: connection refused&gt; | MCP server failed to connect, continuing (continueOnError)
+
+stderr | src/mcp/__tests__/client.test.ts &gt; continueOnError &gt; does not retry connection on subsequent calls after continueOnError failure
+client=&lt;TestApp&gt;, error=&lt;Error: connection refused&gt; | MCP server failed to connect, continuing (continueOnError)
+
+stderr | src/mcp/__tests__/client.test.ts &gt; continueOnError &gt; recovers after explicit connect(true) when server comes back
+client=&lt;TestApp&gt;, error=&lt;Error: connection refused&gt; | MCP server failed to connect, continuing (continueOnError)
+
+stderr | src/multiagent/__tests__/graph.test.ts &gt; Graph &gt; invoke &gt; returns failed result when agent throws
+node_id=&lt;a&gt;, error=&lt;agent exploded&gt; | node execution failed
+
+ ✓ |unit-node| src/mcp/__tests__/client.test.ts (108 tests) 629ms
+ ✓ |unit-node| src/vended-tools/bash/__tests__/bash.test.node.ts (46 tests) 546ms
+ ✓ |unit-node| src/vended-interventions/cedar/__tests__/cedar.test.node.ts (39 tests) 181ms
+stderr | src/multiagent/__tests__/swarm.test.ts &gt; Swarm &gt; invoke &gt; returns failed result when agent throws
+node_id=&lt;a&gt;, error=&lt;agent exploded&gt; | node execution failed
+
+ ✓ |unit-node| src/multiagent/__tests__/graph.test.ts (54 tests) 179ms
+stderr | src/multiagent/__tests__/swarm.test.ts &gt; Swarm &gt; resume with session manager &gt; starts fresh when the resume target agent was removed from the swarm
+node_id=&lt;b&gt; | resume target not found in swarm, starting fresh
+
+ ✓ |unit-node| src/vended-plugins/context-offloader/__tests__/storage.test.ts (32 tests) 94ms
+ ✓ |unit-node| src/multiagent/__tests__/swarm.test.ts (54 tests) 218ms
+ ✓ |unit-node| src/a2a/__tests__/async-lock.test.ts (3 tests) 60ms
+ ✓ |unit-node| src/vended-tools/sleep/__tests__/sleep.test.ts (19 tests) 89ms
+ ✓ |unit-node| src/mcp/__tests__/task-client-legacy.test.node.ts (1 test) 99ms
+ ✓ |unit-node| src/vended-plugins/context-offloader/__tests__/storage.test.node.ts (10 tests) 62ms
+stderr | src/multiagent/__tests__/interrupts.test.ts &gt; Multi-agent interrupts: round-trip &gt; Graph: agent interrupts, resumes via top-level SessionManager
+graph has no maxSteps or timeout set; execution is unbounded
+
+Hello
+Hello
+Hello
+
+  ⏳ testTool
+
+🔧 Tool #1: testTool
+✓ Tool completed
+Tool result processed
+stderr | src/multiagent/__tests__/interrupts.test.ts &gt; Multi-agent interrupts: round-trip &gt; Swarm: agent interrupts, resumes via top-level SessionManager
+swarm has no maxSteps or timeout set; execution is unbounded
+
+
+  ⏳ testTool
+
+🔧 Tool #1: testTool
+✓ Tool completed
+Done
+Partial...Hello
+Response text
+Hello
+
+  ⏳ calc
+ ✓ |unit-node| src/vended-tools/file-editor/__tests__/file-editor.test.node.ts (67 tests) 932ms
+
+🔧 Tool #1: calc
+✓ Tool completed
+The answer is 3
+
+  ⏳ calc
+
+🔧 Tool #1: calc
+✓ Tool completed
+Done
+
+  ⏳ testTool
+
+🔧 Tool #1: testTool
+✓ Tool completed
+Done
+PartialHello
+
+  ⏳ slowTool
+
+🔧 Tool #1: slowTool
+✓ Tool completed
+
+Hello
+
+  ⏳ testTool
+
+🔧 Tool #1: testTool
+✓ Tool completed
+Partial
+  ⏳ testTool
+
+🔧 Tool #1: testTool
+✓ Tool completed
+Partial
+  ⏳ testTool
+Consistent response
+Consistent response
+
+  ⏳ testTool
+
+🔧 Tool #1: testTool
+✓ Tool completed
+Final
+
+  ⏳ testTool
+
+🔧 Tool #1: testTool
+✓ Tool completed
+Final
+Response
+Response
+First response
+Second response
+PartialSuccess
+stderr | src/agent/__tests__/agent.test.ts &gt; Agent &gt; nested tool arrays &gt; flattens nested arrays at any depth &gt; NaN
+model_id=&lt;global.anthropic.claude-sonnet-4-6&gt; | using default modelId, which is subject to change | set modelId explicitly to pin the value
+
+First response
+First response
+First response
+Second response
+Bedrock response
+OpenAI response
+Response
+Response
+Response
+stderr | src/vended-tools/web-fetch/__tests__/extract.test.ts &gt; htmlToMarkdown &gt; returns original input on conversion failure
+error=&lt;TypeError: null is not a string, or an element/document/fragment node.&gt; | html_to_markdown failed, returning raw html
+
+Response
+Response
+Response
+Response
+Response
+Response
+Response
+Response
+Response
+ ✓ |unit-node| src/vended-tools/web-fetch/__tests__/extract.test.ts (24 tests) 72ms
+
+  ⏳ strands_structured_output
+
+🔧 Tool #1: strands_structured_output
+✓ Tool completed
+
+First response
+  ⏳ strands_structured_output
+
+🔧 Tool #1: strands_structured_output
+✓ Tool completed
+
+Plain text, no tool call
+  ⏳ strands_structured_output
+
+🔧 Tool #1: strands_structured_output
+✓ Tool completed
+
+ResponseResponsePartial...
+  ⏳ strands_structured_output
+
+🔧 Tool #1: strands_structured_output
+✗ Tool failed
+
+  ⏳ strands_structured_output
+
+🔧 Tool #2: strands_structured_output
+✓ Tool completed
+
+Hello
+
+  ⏳ strands_structured_output
+
+🔧 Tool #1: strands_structured_output
+✓ Tool completed
+
+Partial...
+  ⏳ strands_structured_output
+
+🔧 Tool #1: strands_structured_output
+✓ Tool completed
+
+
+  ⏳ strands_structured_output
+
+🔧 Tool #1: strands_structured_output
+✓ Tool completed
+
+
+  ⏳ strands_structured_output
+
+🔧 Tool #1: strands_structured_output
+✓ Tool completed
+
+Done
+  ⏳ strands_structured_output
+
+🔧 Tool #2: strands_structured_output
+✓ Tool completed
+
+
+  ⏳ strands_structured_output
+
+🔧 Tool #1: strands_structured_output
+✓ Tool completed
+
+stderr | src/agent/__tests__/agent.test.ts &gt; Agent._redactLastMessage &gt; does not redact when last message is not from user
+role=&lt;assistant&gt; | received input redaction but last message is not from user | redaction skipped
+
+ ✓ |unit-node| src/background-tasks/__tests__/background-tasks.test.ts (6 tests) 86ms
+stderr | src/multiagent/__tests__/interrupts.test.ts &gt; Multi-agent interrupts: round-trip &gt; Nested orchestrator: interrupts bubble up on first run but do not round-trip without a nested SessionManager
+node_id=&lt;inner&gt;, error=&lt;interrupt_id=&lt;tool:tool-n:confirm_nested&gt; | no node found with matching interrupt&gt; | node execution failed
+
+
+  ⏳ loop
+
+🔧 Tool #1: loop
+✓ Tool completed
+
+done
+
+  ⏳ loop
+
+🔧 Tool #1: loop
+✓ Tool completed
+
+  ⏳ loop
+
+🔧 Tool #2: loop
+✓ Tool completed
+
+
+  ⏳ loop
+
+🔧 Tool #1: loop
+✓ Tool completed
+
+
+  ⏳ loop
+
+🔧 Tool #1: loop
+✓ Tool completed
+
+  ⏳ loop
+
+🔧 Tool #2: loop
+✓ Tool completed
+
+final answer
+
+  ⏳ loop
+
+🔧 Tool #1: loop
+✓ Tool completed
+
+
+  ⏳ loop
+
+🔧 Tool #1: loop
+✓ Tool completed
+
+
+  ⏳ loop
+
+🔧 Tool #1: loop
+✓ Tool completed
+
+first
+second
+
+  ⏳ loop
+
+🔧 Tool #1: loop
+✓ Tool completed
+
+ ✓ |unit-node| src/multiagent/__tests__/interrupts.test.ts (11 tests) 100ms
+Hello
+Hello
+ ✓ |unit-node| src/vended-tools/shell/__tests__/shell.test.node.ts (14 tests) 1014ms
+     ✓ timeout error carries the partial output with the same field names as a success result  306ms
+     ✓ timeout surfaces as a failed tool result that still includes the partial output  305ms
+stderr | src/agent/__tests__/agent.tracer.test.node.ts &gt; Agent tracer integration &gt; constructor &gt; initializes Tracer with traceAttributes from config
+model_id=&lt;global.anthropic.claude-sonnet-4-6&gt; | using default modelId, which is subject to change | set modelId explicitly to pin the value
+
+Hello
+PartialHello
+Hello
+Hello
+Hello
+
+  ⏳ testTool
+
+🔧 Tool #1: testTool
+✓ Tool completed
+Done
+  ⏳ testTool
+
+🔧 Tool #1: testTool
+✓ Tool completed
+ ✓ |unit-node| src/agent/__tests__/agent.test.ts (135 tests) 109ms
+Done
+
+  ⏳ testTool
+
+🔧 Tool #1: testTool
+✓ Tool completed
+Done
+PartialFirst response
+  ⏳ strands_structured_output
+
+🔧 Tool #1: strands_structured_output
+✓ Tool completed
+
+Hello
+
+  ⏳ testTool
+
+🔧 Tool #1: testTool
+✓ Tool completed
+Done
+Selected response
+
+  ⏳ testTool
+
+🔧 Tool #1: testTool
+✓ Tool completed
+Done
+
+  ⏳ missingTool
+
+🔧 Tool #1: missingTool
+✗ Tool failed
+Done
+
+  ⏳ failTool
+
+🔧 Tool #1: failTool
+✗ Tool failed
+Done
+
+  ⏳ tool1
+
+  ⏳ tool2
+
+🔧 Tool #1: tool1
+
+🔧 Tool #2: tool2
+✓ Tool completed
+✓ Tool completed
+Done
+
+  ⏳ tool1
+
+  ⏳ tool2
+
+🔧 Tool #1: tool1
+
+🔧 Tool #2: tool2
+stderr | src/mcp/__tests__/config.test.node.ts &gt; McpClient.loadServers &gt; skips invalid task settings when that server allows errors and keeps valid servers
+server=&lt;invalid&gt;, error=&lt;TypeError: MCP task request timeout must be a positive safe integer no greater than 2147483647&gt; | MCP client config failed, skipping (continueOnError)
+
+stderr | src/mcp/__tests__/config.test.node.ts &gt; McpClient.loadServers &gt; env interpolation &gt; skips server with missing env var when continueOnError is true
+server=&lt;broken&gt;, error=&lt;Error: Environment variable "NONEXISTENT_VAR" is not set&gt; | MCP server config failed, skipping (continueOnError)
+
+✓ Tool completed
+✓ Tool completed
+Done
+stderr | src/mcp/__tests__/config.test.node.ts &gt; McpClient.loadServers &gt; defaults and per-server overrides &gt; reports and optionally skips missing environment variables in new config fields
+server=&lt;bad&gt;, error=&lt;Error: Environment variable "NONEXISTENT_PATTERN" is not set&gt; | MCP server config failed, skipping (continueOnError)
+
+Hello
+Hello
+Hello
+Hello
+
+  ⏳ testTool
+
+🔧 Tool #1: testTool
+✓ Tool completed
+Done
+First
+Second
+stderr | src/mcp/__tests__/config.test.node.ts &gt; McpClient.loadServers &gt; error cases &gt; skips an invalid config regex when continueOnError is true
+server=&lt;bad&gt;, error=&lt;SyntaxError: Server "bad": invalid regex in toolFilters.rejected: "([unclosed": SyntaxError: Invalid regular expression: /([unclosed/: Unterminated character class&gt; | MCP server config failed, skipping (continueOnError)
+
+
+  ⏳ strands_structured_output
+
+🔧 Tool #1: strands_structured_output
+✓ Tool completed
+
+I refuseI refuseI refuseI refuse
+  ⏳ strands_structured_output
+
+🔧 Tool #1: strands_structured_output
+✓ Tool completed
+
+
+  ⏳ strands_structured_output
+
+🔧 Tool #1: strands_structured_output
+✗ Tool failed
+
+  ⏳ strands_structured_output
+
+🔧 Tool #2: strands_structured_output
+✓ Tool completed
+
+Partial ✓ |unit-node| src/mcp/__tests__/config.test.node.ts (48 tests) 42ms
+stderr | src/vended-plugins/context-offloader/__tests__/plugin.test.ts &gt; ContextOffloader &gt; hook behavior &gt; preserves original result on storage failure
+tool_use_id=&lt;tool-123&gt; | failed to offload tool result, keeping original Error: storage down
+    at InMemoryStorage.&lt;anonymous&gt; (&lt;checkout&gt;/strands-ts/src/vended-plugins/context-offloader/__tests__/plugin.test.ts:223:15)
+    at InMemoryStorage.store (file://&lt;checkout&gt;/strands-ts/node_modules/@vitest/spy/dist/index.js:332:34)
+    at storeContent (&lt;checkout&gt;/strands-ts/src/vended-plugins/context-offloader/plugin.ts:49:51)
+    at ContextOffloader._storeBlock (&lt;checkout&gt;/strands-ts/src/vended-plugins/context-offloader/plugin.ts:384:25)
+    at &lt;checkout&gt;/strands-ts/src/vended-plugins/context-offloader/plugin.ts:480:69
+    at Array.map (&lt;anonymous&gt;)
+    at ContextOffloader._handleToolResult (&lt;checkout&gt;/strands-ts/src/vended-plugins/context-offloader/plugin.ts:480:46)
+    at processTicksAndRejections (node:internal/process/task_queues:104:5)
+    at invokeTrackedHook (&lt;checkout&gt;/strands-ts/src/__fixtures__/agent-helpers.ts:122:5)
+    at &lt;checkout&gt;/strands-ts/src/vended-plugins/context-offloader/__tests__/plugin.test.ts:232:7
+
+ ✓ |unit-node| src/agent/__tests__/agent.tracer.test.node.ts (42 tests) 89ms
+ ✓ |unit-node| src/vended-plugins/context-offloader/__tests__/file-storage-sandbox.test.node.ts (9 tests) 1415ms
+     ✓ produces unique references for repeated keys  355ms
+ ✓ |unit-node| src/models/__tests__/vercel.test.ts (110 tests) 51ms
+ ✓ |unit-node| src/vended-plugins/context-offloader/__tests__/plugin.test.ts (51 tests) 54ms
+stderr | src/multiagent/__tests__/swarm.tracer.test.ts &gt; Swarm tracer integration &gt; multi-agent span lifecycle &gt; starts and ends multi-agent span on successful invocation
+swarm has no maxSteps or timeout set; execution is unbounded
+
+stderr | src/multiagent/__tests__/swarm.tracer.test.ts &gt; Swarm tracer integration &gt; node span lifecycle &gt; ends node span with error when node agent throws
+node_id=&lt;a&gt;, error=&lt;agent exploded&gt; | node execution failed
+
+Hello
+Hello
+Hello
+First response
+Second response
+
+  ⏳ testTool
+
+🔧 Tool #1: testTool
+✓ Tool completed
+Final response
+
+  ⏳ failingTool
+
+🔧 Tool #1: failingTool
+✗ Tool failed
+Handled error
+Hello ✓ |unit-node| src/multiagent/__tests__/swarm.tracer.test.ts (13 tests) 39ms
+
+Response
+Success after retry
+stderr | src/models/__tests__/anthropic.test.ts &gt; AnthropicModel &gt; prompt caching &gt; does not accumulate breakpoints across turns
+count=&lt;49&gt; | stripped extra cache points, cacheConfig keeps the first cache point in the last user message; unset cacheConfig to keep every cache point
+
+stderr | src/models/__tests__/anthropic.test.ts &gt; AnthropicModel &gt; prompt caching &gt; strips a cache point in an earlier message
+count=&lt;1&gt; | stripped extra cache points, cacheConfig keeps the first cache point in the last user message; unset cacheConfig to keep every cache point
+
+First responseSecond response after retry
+stderr | src/models/__tests__/anthropic.test.ts &gt; AnthropicModel &gt; prompt caching &gt; strips hand-placed cache points even when there is nothing to cache
+count=&lt;1&gt; | stripped extra cache points, cacheConfig keeps the first cache point in the last user message; unset cacheConfig to keep every cache point
+
+
+  ⏳ retryableTool
+
+🔧 Tool #1: retryableTool
+
+🔧 Tool #2: retryableTool
+✓ Tool completed
+Done
+
+  ⏳ cancelledTool
+
+🔧 Tool #1: cancelledTool
+✗ Tool failed
+stderr | src/models/__tests__/anthropic.test.ts &gt; AnthropicModel &gt; prompt caching &gt; keeps the breakpoint when the last cacheable block is dropped in translation
+source_type=&lt;imageSourceS3Location&gt; | s3 location sources are not supported by anthropic | skipping
+
+
+
+  ⏳ cancelledTool
+
+🚫 Tool #1: cancelledTool (denied)
+✗ Tool failed
+
+
+  ⏳ failingTool
+
+🔧 Tool #1: failingTool
+✗ Tool failed
+Handled error
+stderr | src/models/__tests__/anthropic.test.ts &gt; AnthropicModel &gt; prompt caching &gt; never places a breakpoint on a reasoning block
+source_type=&lt;imageSourceS3Location&gt; | s3 location sources are not supported by anthropic | skipping
+
+
+  ⏳ retryableTool
+
+🔧 Tool #1: retryableTool
+
+🔧 Tool #2: retryableTool
+✓ Tool completed
+Done
+stderr | src/models/__tests__/anthropic.test.ts &gt; AnthropicModel &gt; prompt caching &gt; disables caching for an unknown strategy
+strategy=&lt;sometimes&gt; | unknown cache strategy, prompt caching disabled
+strategy=&lt;sometimes&gt; | unknown cache strategy, prompt caching disabled
+
+
+  ⏳ successTool
+
+🔧 Tool #1: successTool
+
+🔧 Tool #2: successTool
+✓ Tool completed
+Done
+stderr | src/models/__tests__/anthropic.test.ts &gt; AnthropicModel &gt; prompt caching &gt; falls back to automatic placement when everything ahead is dropped in translation
+source_type=&lt;imageSourceS3Location&gt; | s3 location sources are not supported by anthropic | skipping
+msg_idx=&lt;0&gt; | nothing ahead of the placed cache point can carry one, falling back to automatic placement
+
+
+  ⏳ blockedTool
+
+🚫 Tool #1: blockedTool (denied)
+✗ Tool failed
+Done
+stderr | src/models/__tests__/anthropic.test.ts &gt; AnthropicModel &gt; prompt caching &gt; falls back to automatic placement when only a reasoning block is ahead of the point
+msg_idx=&lt;0&gt; | nothing ahead of the placed cache point can carry one, falling back to automatic placement
+
+
+  ⏳ blockedTool
+
+🚫 Tool #1: blockedTool (denied)
+✗ Tool failed
+Done
+
+  ⏳ allowedTool
+
+  ⏳ blockedTool
+
+🔧 Tool #1: allowedTool
+stderr | src/models/__tests__/anthropic.test.ts &gt; AnthropicModel &gt; prompt caching &gt; pins the media request body shared with strands-py
+source_type=&lt;imageSourceS3Location&gt; | s3 location sources are not supported by anthropic | skipping
+
+
+🚫 Tool #2: blockedTool (denied)
+✓ Tool completed
+✗ Tool failed
+Done
+
+  ⏳ blockedTool
+
+🚫 All tools denied
+✗ Tool failed
+Done
+
+  ⏳ blockedTool
+
+🚫 All tools denied
+✗ Tool failed
+Done
+
+  ⏳ tool1
+
+  ⏳ tool2
+
+🚫 All tools denied
+✗ Tool failed
+✗ Tool failed
+Done
+
+  ⏳ blockedTool
+
+🚫 Tool #1: blockedTool (denied)
+✗ Tool failed
+Done
+
+  ⏳ retryTool
+
+🚫 Tool #1: retryTool (denied)
+
+🔧 Tool #2: retryTool
+✓ Tool completed
+Done
+
+  ⏳ myTool
+
+🔧 Tool #1: myTool
+✓ Tool completed
+Done
+
+  ⏳ myTool
+
+🔧 Tool #1: myTool
+✓ Tool completed
+
+
+  ⏳ myTool
+
+🔧 Tool #1: myTool
+✓ Tool completed
+stderr | src/models/__tests__/anthropic.test.ts &gt; AnthropicModel &gt; anthropicTools &gt; logs an error when a server-side tool fails
+block_type=&lt;web_search_tool_result&gt;, error_code=&lt;max_uses_exceeded&gt; | server-side tool failed
+
+
+
+  ⏳ myTool
+
+🔧 Tool #1: myTool
+✓ Tool completed
+Should not reach this
+
+  ⏳ myTool
+
+🔧 Tool #1: myTool
+✓ Tool completed
+Should not reach this
+
+  ⏳ myTool
+
+🔧 Tool #1: myTool
+✓ Tool completed
+Should not reach this
+
+  ⏳ myTool
+
+🔧 Tool #1: myTool
+✓ Tool completed
+
+
+  ⏳ myTool
+
+🔧 Tool #1: myTool
+✓ Tool completed
+
+
+  ⏳ myTool
+
+🔧 Tool #1: myTool
+✓ Tool completed
+
+
+  ⏳ tool1
+
+  ⏳ tool2
+
+🔧 Tool #1: tool1
+
+🔧 Tool #2: tool2
+✓ Tool completed
+✓ Tool completed
+
+
+  ⏳ myTool
+
+🔧 Tool #1: myTool
+✓ Tool completed
+
+
+  ⏳ myTool
+
+🚫 All tools denied
+✗ Tool failed
+
+
+
+
+
+Hello
+
+  ⏳ originalTool
+
+🔧 Tool #1: originalTool
+✓ Tool completed
+Done
+ ✓ |unit-node| src/models/__tests__/anthropic.test.ts (138 tests) 48ms
+
+  ⏳ registryTool
+
+🚫 Tool #1: registryTool (denied)
+✗ Tool failed
+Done
+
+  ⏳ originalTool
+
+  ⏳ otherTool
+
+🔧 Tool #1: originalTool
+
+🔧 Tool #2: otherTool
+✓ Tool completed
+✓ Tool completed
+Done
+
+  ⏳ tool
+
+🔧 Tool #1: tool
+✓ Tool completed
+Done
+
+  ⏳ orig
+
+🔧 Tool #1: renamed
+✓ Tool completed
+Done
+
+  ⏳ toolA
+
+  ⏳ toolB
+
+🔧 Tool #1: toolA
+
+🔧 Tool #2: toolB
+✓ Tool completed
+✓ Tool completed
+Done
+
+  ⏳ tool
+
+🔧 Tool #1: tool
+✓ Tool completed
+Done
+
+  ⏳ tool
+
+🔧 Tool #1: tool
+✓ Tool completed
+Done
+firstsecond
+abc
+only
+firstsecond
+firstsecond
+Hello
+Hello
+ ✓ |unit-node| src/agent/__tests__/agent.hook.test.ts (66 tests) 67ms
+ ✓ |unit-node| src/middleware/__tests__/agent-middleware.test.ts (62 tests) 56ms
+stderr | src/agent/__tests__/agent-as-tool.interrupt.test.ts &gt; AgentAsTool interrupts &gt; raises the interrupt again when the stored turn cannot be loaded
+Agent 'sub' failed to restore its interrupted turn: Error: Expected snapshot scope 'agent', got 'undefined'
+
+stderr | src/vended-tools/subagent/__tests__/subagent.test.ts &gt; subagent tool &gt; with real agents &gt; delegates to a child built from the parent, propagating a child tool interrupt and resuming it
+contextWindowLimit is not set on the model, using default of 200000 for utilization estimate | set contextWindowLimit in your model config for accurate results
+
+ ✓ |unit-node| src/agent/__tests__/agent-as-tool.interrupt.test.ts (15 tests) 44ms
+stderr | src/models/openai/__tests__/chat.test.ts &gt; OpenAIModel &gt; managed params warning &gt; warns on construction when params contains provider-managed keys
+params_key=&lt;model&gt; | 'model' is managed by the provider and will be ignored in params — use the dedicated config property instead
+params_key=&lt;stream&gt; | 'stream' is managed by the provider and will be ignored in params — use the dedicated config property instead
+
+stderr | src/models/openai/__tests__/chat.test.ts &gt; OpenAIModel &gt; managed params warning &gt; warns on updateConfig when params contains provider-managed keys
+params_key=&lt;stream_options&gt; | 'stream_options' is managed by the provider and will be ignored in params — use the dedicated config property instead
+
+stderr | src/models/openai/__tests__/chat.test.ts &gt; OpenAIModel &gt; managed params warning &gt; provider-managed fields in params are overridden and cannot take effect
+params_key=&lt;model&gt; | 'model' is managed by the provider and will be ignored in params — use the dedicated config property instead
+params_key=&lt;messages&gt; | 'messages' is managed by the provider and will be ignored in params — use the dedicated config property instead
+params_key=&lt;stream&gt; | 'stream' is managed by the provider and will be ignored in params — use the dedicated config property instead
+params_key=&lt;stream_options&gt; | 'stream_options' is managed by the provider and will be ignored in params — use the dedicated config property instead
+
+ ✓ |unit-node| src/vended-tools/subagent/__tests__/subagent.test.ts (57 tests) 50ms
+stderr | src/models/openai/__tests__/chat.test.ts &gt; OpenAIModel &gt; stop reasons &gt; handles unknown stop reasons with warning
+finish_reason=&lt;new_unknown_reason&gt;, fallback=&lt;newUnknownReason&gt; | unknown openai stop reason, using camelCase conversion as fallback
+
+stderr | src/models/openai/__tests__/chat.test.ts &gt; OpenAIModel &gt; media blocks &gt; splits image from tool result into separate user message
+tool_call_id=&lt;tool-1&gt; | moving images from tool result to separate user message for openai compatibility
+
+stderr | src/models/openai/__tests__/chat.test.ts &gt; OpenAIModel &gt; media blocks &gt; injects placeholder text when tool result contains only images
+tool_call_id=&lt;tool-1&gt; | moving images from tool result to separate user message for openai compatibility
+
+stderr | src/models/openai/__tests__/chat.test.ts &gt; OpenAIModel &gt; tool result and text ordering &gt; keeps media hoisted out of a tool result ahead of the injected text
+tool_call_id=&lt;tu1&gt; | moving images from tool result to separate user message for openai compatibility
+
+ ✓ |unit-node| src/models/openai/__tests__/chat.test.ts (98 tests) 42ms
+stderr | src/models/openai/__tests__/responses.test.ts &gt; OpenAIModel (api: 'responses') &gt; constructor &gt; uses provided client instance and skips OpenAI constructor
+model_id=&lt;gpt-5.4&gt; | using default modelId, which is subject to change | set modelId explicitly to pin the value
+
+stderr | src/models/openai/__tests__/responses.test.ts &gt; OpenAIModel (api: 'responses') &gt; stateful &gt; is construction-only and cannot be changed via updateConfig
+stateful=&lt;true&gt; | 'stateful' is construction-only and cannot be changed via updateConfig — ignoring
+
+stderr | src/models/openai/__tests__/responses.test.ts &gt; OpenAIModel (api: 'responses') &gt; managed params warning &gt; warns on construction when params contains provider-managed keys
+params_key=&lt;model&gt; | 'model' is managed by the provider and will be ignored in params — use the dedicated config property instead
+params_key=&lt;store&gt; | 'store' is managed by the provider and will be ignored in params — use the dedicated config property instead
+
+stderr | src/models/openai/__tests__/responses.test.ts &gt; OpenAIModel (api: 'responses') &gt; managed params warning &gt; warns on updateConfig when params contains provider-managed keys
+params_key=&lt;stream&gt; | 'stream' is managed by the provider and will be ignored in params — use the dedicated config property instead
+
+stderr | src/models/openai/__tests__/responses.test.ts &gt; OpenAIModel (api: 'responses') &gt; request formatting &gt; ignores a non-retention cacheConfig.ttl and warns
+ttl=&lt;5m&gt; | cacheConfig.ttl is not an openai retention value, ignoring
+
+stderr | src/hooks/__tests__/registry.test.ts &gt; HookRegistryImplementation &gt; addCallback &gt; registers callback for event type
+model_id=&lt;global.anthropic.claude-sonnet-4-6&gt; | using default modelId, which is subject to change | set modelId explicitly to pin the value
+
+stderr | src/models/openai/__tests__/responses.test.ts &gt; OpenAIModel (api: 'responses') &gt; request formatting &gt; provider-managed fields in params are overridden and cannot take effect
+params_key=&lt;model&gt; | 'model' is managed by the provider and will be ignored in params — use the dedicated config property instead
+params_key=&lt;input&gt; | 'input' is managed by the provider and will be ignored in params — use the dedicated config property instead
+params_key=&lt;stream&gt; | 'stream' is managed by the provider and will be ignored in params — use the dedicated config property instead
+params_key=&lt;store&gt; | 'store' is managed by the provider and will be ignored in params — use the dedicated config property instead
+
+ ✓ |unit-node| src/background-tasks/in-process/__tests__/manager.test.ts (8 tests) 28ms
+stderr | src/interventions/__tests__/registry.test.ts &gt; InterventionRegistry &gt; constructor &gt; rejects duplicate handler names
+model_id=&lt;global.anthropic.claude-sonnet-4-6&gt; | using default modelId, which is subject to change | set modelId explicitly to pin the value
+
+stderr | src/models/openai/__tests__/responses.test.ts &gt; OpenAIModel (api: 'responses') &gt; request formatting &gt; drops non-text assistant history content with a warning
+content_type=&lt;input_image&gt; | non-text assistant history content has no valid responses api input shape | dropping
+
+stderr | src/models/openai/__tests__/responses.test.ts &gt; OpenAIModel (api: 'responses') &gt; request formatting &gt; omits an assistant history turn whose content is entirely non-text
+content_type=&lt;input_image&gt; | non-text assistant history content has no valid responses api input shape | dropping
+
+stderr | src/vended-plugins/goal/__tests__/plugin.test.ts &gt; GoalLoop &gt; constructor &gt; accepts custom name
+my:goal has no maxAttempts or timeout; execution is unbounded
+
+ ✓ |unit-node| src/models/openai/__tests__/responses.test.ts (66 tests) 28ms
+stderr | src/memory/__tests__/memory-manager.test.ts &gt; MemoryManager &gt; search &gt; gracefully handles store failures
+store=&lt;failing&gt;, reason=&lt;network error&gt; | store search failed
+
+stderr | src/memory/__tests__/memory-manager.test.ts &gt; MemoryManager &gt; add &gt; awaits writes and throws AggregateError naming the failed store on partial failure
+store=&lt;failing&gt;, reason=&lt;write error&gt; | store write failed
+
+
+  ⏳ blockedTool
+
+🚫 Tool #1: blockedTool (denied)
+✗ Tool failed
+Done
+
+  ⏳ testTool
+
+🔧 Tool #1: testTool
+✓ Tool completed
+Done
+stderr | src/interventions/__tests__/registry.test.ts &gt; InterventionRegistry &gt; edge cases &gt; warns when action has no effect on event type
+handler=&lt;confirm-invocation&gt;, event=&lt;beforeInvocation&gt; | confirm has no effect
+
+stderr | src/memory/__tests__/memory-manager.test.ts &gt; MemoryManager &gt; tool store scoping &gt; add tool throws a flattened error with concrete reasons when entries fail (default awaits)
+store=&lt;failing&gt;, reason=&lt;write error&gt; | store write failed
+store=&lt;failing&gt;, reason=&lt;write error&gt; | store write failed
+
+stderr | src/agent/__tests__/agent.concurrent.test.ts &gt; Agent concurrent tool execution &gt; uses ConcurrentToolExecutor by default
+model_id=&lt;global.anthropic.claude-sonnet-4-6&gt; | using default modelId, which is subject to change | set modelId explicitly to pin the value
+
+stderr | src/memory/__tests__/memory-manager.test.ts &gt; MemoryManager &gt; tool store scoping &gt; add tool with waitForWrites: false returns accepted even when a store write fails (swallows it)
+store=&lt;failing&gt;, reason=&lt;write error&gt; | store write failed
+store=&lt;failing&gt;, reason=&lt;write error&gt; | store write failed
+
+stderr | src/memory/extraction/__tests__/extraction.test.ts &gt; MemoryManager extraction &gt; addMessages context (per-message seqs) &gt; re-fires the same seqs for a multi-message batch whose save failed (stable across retries)
+store=&lt;s&gt;, reason=&lt;backend down&gt; | memory extraction failed
+
+stderr | src/memory/extraction/__tests__/extraction.test.ts &gt; MemoryManager extraction &gt; addMessages context (per-message seqs) &gt; anchors the seq to the message, not the batch position
+store=&lt;s&gt;, reason=&lt;backend down&gt; | memory extraction failed
+
+stderr | src/memory/__tests__/memory-manager.test.ts &gt; MemoryManager &gt; injection &gt; query &gt; fails open (returns undefined) when a custom query throws
+reason=&lt;boom&gt; | injection query threw; skipping injection
+
+stderr | src/memory/__tests__/memory-manager.test.ts &gt; MemoryManager &gt; injection &gt; format &gt; fails open (returns undefined) when a custom format throws
+reason=&lt;boom&gt; | injection format threw; skipping injection
+
+stderr | src/memory/__tests__/memory-manager.test.ts &gt; MemoryManager &gt; AgentConfig integration &gt; auto-wraps MemoryManagerConfig into MemoryManager instance
+model_id=&lt;global.anthropic.claude-sonnet-4-6&gt; | using default modelId, which is subject to change | set modelId explicitly to pin the value
+
+stderr | src/memory/extraction/__tests__/extraction.test.ts &gt; MemoryManager extraction &gt; extractor route &gt; rolls back and retries the whole batch if any entry write fails
+store=&lt;s&gt;, reason=&lt;failed to write 1 of 2 extracted entries&gt; | memory extraction failed
+
+stderr | src/memory/extraction/__tests__/extraction.test.ts &gt; MemoryManager extraction &gt; high-water-mark dedup &gt; retries the same messages on the next fire if a write fails
+store=&lt;s&gt;, reason=&lt;backend down&gt; | memory extraction failed
+
+stderr | src/memory/extraction/__tests__/extraction.test.ts &gt; MemoryManager extraction &gt; backing off and recovering from a failing store &gt; backs off to periodic probes after SAVE_FAILURES_BEFORE_BACKOFF failures in a row
+store=&lt;s&gt;, reason=&lt;backend down&gt; | memory extraction failed
+
+stderr | src/memory/extraction/__tests__/extraction.test.ts &gt; MemoryManager extraction &gt; backing off and recovering from a failing store &gt; backs off to periodic probes after SAVE_FAILURES_BEFORE_BACKOFF failures in a row
+store=&lt;s&gt;, reason=&lt;backend down&gt; | memory extraction failed
+
+stderr | src/memory/extraction/__tests__/extraction.test.ts &gt; MemoryManager extraction &gt; backing off and recovering from a failing store &gt; backs off to periodic probes after SAVE_FAILURES_BEFORE_BACKOFF failures in a row
+store=&lt;s&gt;, reason=&lt;backend down&gt; | memory extraction failed
+
+stderr | src/memory/extraction/__tests__/extraction.test.ts &gt; MemoryManager extraction &gt; backing off and recovering from a failing store &gt; backs off to periodic probes after SAVE_FAILURES_BEFORE_BACKOFF failures in a row
+store=&lt;s&gt;, reason=&lt;backend down&gt; | memory extraction failed
+
+stderr | src/memory/extraction/__tests__/extraction.test.ts &gt; MemoryManager extraction &gt; backing off and recovering from a failing store &gt; backs off to periodic probes after SAVE_FAILURES_BEFORE_BACKOFF failures in a row
+store=&lt;s&gt;, reason=&lt;backend down&gt; | memory extraction failed
+
+stderr | src/memory/extraction/__tests__/extraction.test.ts &gt; MemoryManager extraction &gt; backing off and recovering from a failing store &gt; backs off to periodic probes after SAVE_FAILURES_BEFORE_BACKOFF failures in a row
+store=&lt;s&gt;, reason=&lt;backend down&gt; | memory extraction failed
+
+stderr | src/memory/extraction/__tests__/extraction.test.ts &gt; MemoryManager extraction &gt; backing off and recovering from a failing store &gt; backs off to periodic probes after SAVE_FAILURES_BEFORE_BACKOFF failures in a row
+store=&lt;s&gt;, reason=&lt;backend down&gt; | memory extraction failed
+
+stderr | src/memory/extraction/__tests__/extraction.test.ts &gt; MemoryManager extraction &gt; backing off and recovering from a failing store &gt; backs off to periodic probes after SAVE_FAILURES_BEFORE_BACKOFF failures in a row
+store=&lt;s&gt;, reason=&lt;backend down&gt; | memory extraction failed
+
+stderr | src/memory/extraction/__tests__/extraction.test.ts &gt; MemoryManager extraction &gt; backing off and recovering from a failing store &gt; backs off to periodic probes after SAVE_FAILURES_BEFORE_BACKOFF failures in a row
+store=&lt;s&gt;, reason=&lt;backend down&gt; | memory extraction failed
+
+stderr | src/memory/extraction/__tests__/extraction.test.ts &gt; MemoryManager extraction &gt; backing off and recovering from a failing store &gt; backs off to periodic probes after SAVE_FAILURES_BEFORE_BACKOFF failures in a row
+store=&lt;s&gt;, failures=&lt;10&gt;, reason=&lt;backend down&gt; | memory store save failing repeatedly
+
+stderr | src/memory/extraction/__tests__/extraction.test.ts &gt; MemoryManager extraction &gt; backing off and recovering from a failing store &gt; backs off to periodic probes after SAVE_FAILURES_BEFORE_BACKOFF failures in a row
+store=&lt;s&gt;, failures=&lt;11&gt;, reason=&lt;backend down&gt; | memory store save failing repeatedly
+
+stderr | src/memory/extraction/__tests__/extraction.test.ts &gt; MemoryManager extraction &gt; backing off and recovering from a failing store &gt; backs off to periodic probes after SAVE_FAILURES_BEFORE_BACKOFF failures in a row
+store=&lt;s&gt;, failures=&lt;12&gt;, reason=&lt;backend down&gt; | memory store save failing repeatedly
+
+stderr | src/memory/extraction/__tests__/extraction.test.ts &gt; MemoryManager extraction &gt; backing off and recovering from a failing store &gt; recovers and saves the buffered backlog when the store comes back
+store=&lt;s&gt;, reason=&lt;down&gt; | memory extraction failed
+
+stderr | src/memory/extraction/__tests__/extraction.test.ts &gt; MemoryManager extraction &gt; backing off and recovering from a failing store &gt; recovers and saves the buffered backlog when the store comes back
+store=&lt;s&gt;, reason=&lt;down&gt; | memory extraction failed
+
+stderr | src/memory/extraction/__tests__/extraction.test.ts &gt; MemoryManager extraction &gt; backing off and recovering from a failing store &gt; recovers and saves the buffered backlog when the store comes back
+store=&lt;s&gt;, reason=&lt;down&gt; | memory extraction failed
+
+stderr | src/memory/extraction/__tests__/extraction.test.ts &gt; MemoryManager extraction &gt; backing off and recovering from a failing store &gt; recovers and saves the buffered backlog when the store comes back
+store=&lt;s&gt;, reason=&lt;down&gt; | memory extraction failed
+
+stderr | src/memory/extraction/__tests__/extraction.test.ts &gt; MemoryManager extraction &gt; backing off and recovering from a failing store &gt; recovers and saves the buffered backlog when the store comes back
+store=&lt;s&gt;, reason=&lt;down&gt; | memory extraction failed
+
+stderr | src/memory/extraction/__tests__/extraction.test.ts &gt; MemoryManager extraction &gt; backing off and recovering from a failing store &gt; recovers and saves the buffered backlog when the store comes back
+store=&lt;s&gt;, reason=&lt;down&gt; | memory extraction failed
+
+stderr | src/memory/extraction/__tests__/extraction.test.ts &gt; MemoryManager extraction &gt; backing off and recovering from a failing store &gt; recovers and saves the buffered backlog when the store comes back
+store=&lt;s&gt;, reason=&lt;down&gt; | memory extraction failed
+
+stderr | src/memory/extraction/__tests__/extraction.test.ts &gt; MemoryManager extraction &gt; backing off and recovering from a failing store &gt; recovers and saves the buffered backlog when the store comes back
+store=&lt;s&gt;, reason=&lt;down&gt; | memory extraction failed
+
+stderr | src/memory/extraction/__tests__/extraction.test.ts &gt; MemoryManager extraction &gt; backing off and recovering from a failing store &gt; recovers and saves the buffered backlog when the store comes back
+store=&lt;s&gt;, reason=&lt;down&gt; | memory extraction failed
+
+stderr | src/memory/extraction/__tests__/extraction.test.ts &gt; MemoryManager extraction &gt; backing off and recovering from a failing store &gt; recovers and saves the buffered backlog when the store comes back
+store=&lt;s&gt;, failures=&lt;10&gt;, reason=&lt;down&gt; | memory store save failing repeatedly
+
+stderr | src/memory/extraction/__tests__/extraction.test.ts &gt; MemoryManager extraction &gt; backing off and recovering from a failing store &gt; recovers and saves the buffered backlog when the store comes back
+store=&lt;s&gt;, failures=&lt;11&gt;, reason=&lt;down&gt; | memory store save failing repeatedly
+
+stderr | src/memory/extraction/__tests__/extraction.test.ts &gt; MemoryManager extraction &gt; backing off and recovering from a failing store &gt; recovers and saves the buffered backlog when the store comes back
+store=&lt;s&gt;, failures=&lt;12&gt;, reason=&lt;down&gt; | memory store save failing repeatedly
+
+stderr | src/memory/extraction/__tests__/extraction.test.ts &gt; MemoryManager extraction &gt; backing off and recovering from a failing store &gt; recovers and saves the buffered backlog when the store comes back
+store=&lt;s&gt;, failures=&lt;13&gt;, reason=&lt;down&gt; | memory store save failing repeatedly
+
+stderr | src/memory/extraction/__tests__/extraction.test.ts &gt; MemoryManager extraction &gt; backing off and recovering from a failing store &gt; recovers and saves the buffered backlog when the store comes back
+store=&lt;s&gt;, failures=&lt;14&gt;, reason=&lt;down&gt; | memory store save failing repeatedly
+
+stderr | src/memory/extraction/__tests__/extraction.test.ts &gt; MemoryManager extraction &gt; backing off and recovering from a failing store &gt; recovers and saves the buffered backlog when the store comes back
+store=&lt;s&gt;, failures=&lt;15&gt;, reason=&lt;down&gt; | memory store save failing repeatedly
+
+stderr | src/memory/extraction/__tests__/extraction.test.ts &gt; MemoryManager extraction &gt; backing off and recovering from a failing store &gt; recovers and saves the buffered backlog when the store comes back
+store=&lt;s&gt;, failures=&lt;16&gt;, reason=&lt;down&gt; | memory store save failing repeatedly
+
+stderr | src/memory/extraction/__tests__/extraction.test.ts &gt; MemoryManager extraction &gt; backing off and recovering from a failing store &gt; a healthy store keeps saving every request while a sibling is backed off
+store=&lt;bad&gt;, reason=&lt;down&gt; | memory extraction failed
+
+stderr | src/memory/extraction/__tests__/extraction.test.ts &gt; MemoryManager extraction &gt; backing off and recovering from a failing store &gt; a healthy store keeps saving every request while a sibling is backed off
+store=&lt;bad&gt;, reason=&lt;down&gt; | memory extraction failed
+
+stderr | src/memory/extraction/__tests__/extraction.test.ts &gt; MemoryManager extraction &gt; backing off and recovering from a failing store &gt; a healthy store keeps saving every request while a sibling is backed off
+store=&lt;bad&gt;, reason=&lt;down&gt; | memory extraction failed
+
+stderr | src/memory/extraction/__tests__/extraction.test.ts &gt; MemoryManager extraction &gt; backing off and recovering from a failing store &gt; a healthy store keeps saving every request while a sibling is backed off
+store=&lt;bad&gt;, reason=&lt;down&gt; | memory extraction failed
+
+stderr | src/memory/extraction/__tests__/extraction.test.ts &gt; MemoryManager extraction &gt; backing off and recovering from a failing store &gt; a healthy store keeps saving every request while a sibling is backed off
+store=&lt;bad&gt;, reason=&lt;down&gt; | memory extraction failed
+
+stderr | src/memory/extraction/__tests__/extraction.test.ts &gt; MemoryManager extraction &gt; backing off and recovering from a failing store &gt; a healthy store keeps saving every request while a sibling is backed off
+store=&lt;bad&gt;, reason=&lt;down&gt; | memory extraction failed
+
+stderr | src/memory/extraction/__tests__/extraction.test.ts &gt; MemoryManager extraction &gt; backing off and recovering from a failing store &gt; a healthy store keeps saving every request while a sibling is backed off
+store=&lt;bad&gt;, reason=&lt;down&gt; | memory extraction failed
+
+stderr | src/memory/extraction/__tests__/extraction.test.ts &gt; MemoryManager extraction &gt; backing off and recovering from a failing store &gt; a healthy store keeps saving every request while a sibling is backed off
+store=&lt;bad&gt;, reason=&lt;down&gt; | memory extraction failed
+
+stderr | src/memory/extraction/__tests__/extraction.test.ts &gt; MemoryManager extraction &gt; backing off and recovering from a failing store &gt; a healthy store keeps saving every request while a sibling is backed off
+store=&lt;bad&gt;, reason=&lt;down&gt; | memory extraction failed
+
+stderr | src/memory/extraction/__tests__/extraction.test.ts &gt; MemoryManager extraction &gt; backing off and recovering from a failing store &gt; a healthy store keeps saving every request while a sibling is backed off
+store=&lt;bad&gt;, failures=&lt;10&gt;, reason=&lt;down&gt; | memory store save failing repeatedly
+
+stderr | src/memory/extraction/__tests__/extraction.test.ts &gt; MemoryManager extraction &gt; backing off and recovering from a failing store &gt; a healthy store keeps saving every request while a sibling is backed off
+store=&lt;bad&gt;, failures=&lt;11&gt;, reason=&lt;down&gt; | memory store save failing repeatedly
+
+stderr | src/memory/extraction/__tests__/extraction.test.ts &gt; MemoryManager extraction &gt; backing off and recovering from a failing store &gt; a healthy store keeps saving every request while a sibling is backed off
+store=&lt;bad&gt;, failures=&lt;12&gt;, reason=&lt;down&gt; | memory store save failing repeatedly
+
+stderr | src/memory/extraction/__tests__/extraction.test.ts &gt; MemoryManager extraction &gt; backing off and recovering from a failing store &gt; flush resolves even when a store is failing
+store=&lt;s&gt;, reason=&lt;down&gt; | memory extraction failed
+
+stderr | src/memory/extraction/__tests__/extraction.test.ts &gt; MemoryManager extraction &gt; backing off and recovering from a failing store &gt; flush resolves even when a store is failing
+store=&lt;s&gt;, reason=&lt;down&gt; | memory extraction failed
+
+stderr | src/memory/extraction/__tests__/extraction.test.ts &gt; MemoryManager extraction &gt; backing off and recovering from a failing store &gt; flush resolves even when a store is failing
+store=&lt;s&gt;, reason=&lt;down&gt; | memory extraction failed
+
+stderr | src/memory/extraction/__tests__/extraction.test.ts &gt; MemoryManager extraction &gt; backing off and recovering from a failing store &gt; flush bypasses backoff and writes the backlog of a recovered store
+store=&lt;s&gt;, reason=&lt;down&gt; | memory extraction failed
+
+stderr | src/memory/extraction/__tests__/extraction.test.ts &gt; MemoryManager extraction &gt; backing off and recovering from a failing store &gt; flush bypasses backoff and writes the backlog of a recovered store
+store=&lt;s&gt;, reason=&lt;down&gt; | memory extraction failed
+
+stderr | src/memory/extraction/__tests__/extraction.test.ts &gt; MemoryManager extraction &gt; backing off and recovering from a failing store &gt; flush bypasses backoff and writes the backlog of a recovered store
+store=&lt;s&gt;, reason=&lt;down&gt; | memory extraction failed
+
+stderr | src/memory/extraction/__tests__/extraction.test.ts &gt; MemoryManager extraction &gt; backing off and recovering from a failing store &gt; flush bypasses backoff and writes the backlog of a recovered store
+store=&lt;s&gt;, reason=&lt;down&gt; | memory extraction failed
+
+stderr | src/memory/extraction/__tests__/extraction.test.ts &gt; MemoryManager extraction &gt; backing off and recovering from a failing store &gt; flush bypasses backoff and writes the backlog of a recovered store
+store=&lt;s&gt;, reason=&lt;down&gt; | memory extraction failed
+
+stderr | src/memory/extraction/__tests__/extraction.test.ts &gt; MemoryManager extraction &gt; backing off and recovering from a failing store &gt; flush bypasses backoff and writes the backlog of a recovered store
+store=&lt;s&gt;, reason=&lt;down&gt; | memory extraction failed
+
+stderr | src/memory/extraction/__tests__/extraction.test.ts &gt; MemoryManager extraction &gt; backing off and recovering from a failing store &gt; flush bypasses backoff and writes the backlog of a recovered store
+store=&lt;s&gt;, reason=&lt;down&gt; | memory extraction failed
+
+stderr | src/memory/extraction/__tests__/extraction.test.ts &gt; MemoryManager extraction &gt; backing off and recovering from a failing store &gt; flush bypasses backoff and writes the backlog of a recovered store
+store=&lt;s&gt;, reason=&lt;down&gt; | memory extraction failed
+
+stderr | src/memory/extraction/__tests__/extraction.test.ts &gt; MemoryManager extraction &gt; backing off and recovering from a failing store &gt; flush bypasses backoff and writes the backlog of a recovered store
+store=&lt;s&gt;, reason=&lt;down&gt; | memory extraction failed
+
+stderr | src/memory/extraction/__tests__/extraction.test.ts &gt; MemoryManager extraction &gt; backing off and recovering from a failing store &gt; flush bypasses backoff and writes the backlog of a recovered store
+store=&lt;s&gt;, failures=&lt;10&gt;, reason=&lt;down&gt; | memory store save failing repeatedly
+
+stderr | src/memory/extraction/__tests__/extraction.test.ts &gt; MemoryManager extraction &gt; backing off and recovering from a failing store &gt; a fully-filtered (empty) turn does not reset the failure streak
+store=&lt;s&gt;, reason=&lt;down&gt; | memory extraction failed
+
+stderr | src/memory/extraction/__tests__/extraction.test.ts &gt; MemoryManager extraction &gt; backing off and recovering from a failing store &gt; a fully-filtered (empty) turn does not reset the failure streak
+store=&lt;s&gt;, reason=&lt;down&gt; | memory extraction failed
+
+stderr | src/memory/extraction/__tests__/extraction.test.ts &gt; MemoryManager extraction &gt; backing off and recovering from a failing store &gt; a fully-filtered (empty) turn does not reset the failure streak
+store=&lt;s&gt;, reason=&lt;down&gt; | memory extraction failed
+
+stderr | src/memory/extraction/__tests__/extraction.test.ts &gt; MemoryManager extraction &gt; backing off and recovering from a failing store &gt; a fully-filtered (empty) turn does not reset the failure streak
+store=&lt;s&gt;, reason=&lt;down&gt; | memory extraction failed
+
+stderr | src/memory/extraction/__tests__/extraction.test.ts &gt; MemoryManager extraction &gt; backing off and recovering from a failing store &gt; a fully-filtered (empty) turn does not reset the failure streak
+store=&lt;s&gt;, reason=&lt;down&gt; | memory extraction failed
+
+stderr | src/memory/extraction/__tests__/extraction.test.ts &gt; MemoryManager extraction &gt; backing off and recovering from a failing store &gt; a fully-filtered (empty) turn does not reset the failure streak
+store=&lt;s&gt;, reason=&lt;down&gt; | memory extraction failed
+
+stderr | src/memory/extraction/__tests__/extraction.test.ts &gt; MemoryManager extraction &gt; backing off and recovering from a failing store &gt; a fully-filtered (empty) turn does not reset the failure streak
+store=&lt;s&gt;, reason=&lt;down&gt; | memory extraction failed
+
+stderr | src/memory/extraction/__tests__/extraction.test.ts &gt; MemoryManager extraction &gt; backing off and recovering from a failing store &gt; a fully-filtered (empty) turn does not reset the failure streak
+store=&lt;s&gt;, reason=&lt;down&gt; | memory extraction failed
+
+stderr | src/memory/extraction/__tests__/extraction.test.ts &gt; MemoryManager extraction &gt; backing off and recovering from a failing store &gt; a fully-filtered (empty) turn does not reset the failure streak
+store=&lt;s&gt;, reason=&lt;down&gt; | memory extraction failed
+
+stderr | src/memory/extraction/__tests__/extraction.test.ts &gt; MemoryManager extraction &gt; backing off and recovering from a failing store &gt; a fully-filtered (empty) turn does not reset the failure streak
+store=&lt;s&gt;, failures=&lt;10&gt;, reason=&lt;down&gt; | memory store save failing repeatedly
+
+stderr | src/models/routing/__tests__/classifier-strategy.test.ts &gt; ClassifierStrategy &gt; agent integration &gt; serves candidate zero when classification fails
+strategy=&lt;ClassifierStrategy&gt;, reason=&lt;classifier_error&gt;, error_type=&lt;ModelError&gt; | classification declined
+
+ ✓ |unit-node| src/hooks/__tests__/registry.test.ts (25 tests) 40ms
+ ✓ |unit-node| src/agent/__tests__/agent.interrupt.test.ts (27 tests) 41ms
+ ✓ |unit-node| src/interventions/__tests__/registry.test.ts (55 tests) 42ms
+ ✓ |unit-node| src/memory/extraction/__tests__/extraction.test.ts (42 tests) 27ms
+stderr | src/session/__tests__/session-manager.test.ts &gt; SessionManager &gt; InitializedEvent handling &gt; warns when snapshot restore overwrites existing messages
+agent_id=&lt;test-agent&gt;, session_id=&lt;test-session&gt; | agent had existing messages that were overwritten by session restore
+
+ ✓ |unit-node| src/memory/__tests__/memory-manager.test.ts (81 tests) 39ms
+stderr | src/session/__tests__/session-manager.test.ts &gt; SessionManager — stash integration &gt; restoreSnapshot &gt; warns when stash storage type changed since snapshot
+session_id=&lt;test-session&gt;, snapshot_storage=&lt;S3Storage&gt;, current_storage=&lt;InMemoryStorage&gt; | stash storage type changed since snapshot was created, stash data may be inaccessible
+
+ ✓ |unit-node| src/agent/__tests__/agent-delegation.test.ts (17 tests) 38ms
+ ✓ |unit-node| src/vended-plugins/goal/__tests__/plugin.test.ts (36 tests) 50ms
+ ✓ |unit-node| src/models/routing/__tests__/classifier-strategy.test.ts (35 tests) 37ms
+ ✓ |unit-node| src/agent/__tests__/agent.concurrent.test.ts (22 tests) 40ms
+ ✓ |unit-node| src/session/__tests__/session-manager.test.ts (69 tests) 51ms
+stderr | src/telemetry/__tests__/tracer.test.node.ts &gt; Tracer &gt; error resilience &gt; returns null when 'startAgentSpan' throws internally
+error=&lt;Error: otel failure&gt; | failed to start agent span
+
+stderr | src/telemetry/__tests__/tracer.test.node.ts &gt; Tracer &gt; error resilience &gt; returns null when 'startModelInvokeSpan' throws internally
+error=&lt;Error: otel failure&gt; | failed to start model invoke span
+
+stderr | src/telemetry/__tests__/tracer.test.node.ts &gt; Tracer &gt; error resilience &gt; returns null when 'startToolCallSpan' throws internally
+error=&lt;Error: otel failure&gt; | failed to start tool call span
+
+stderr | src/telemetry/__tests__/tracer.test.node.ts &gt; Tracer &gt; error resilience &gt; returns null when 'startAgentLoopSpan' throws internally
+error=&lt;Error: otel failure&gt; | failed to start agent loop cycle span
+
+ ✓ |unit-node| src/telemetry/__tests__/tracer.test.node.ts (101 tests) 37ms
+ ✓ |unit-node| src/mcp/__tests__/task-transport.test.ts (12 tests) 58ms
+stderr | src/vended-memory-stores/bedrock-knowledge-base/__tests__/bedrock-knowledge-base-store.test.node.ts &gt; BedrockKnowledgeBaseStore &gt; score bounds &gt; throws when detection fails
+store=&lt;kb&gt;, knowledgeBaseId=&lt;kb-1&gt;, error=&lt;Error: AccessDenied&gt; | knowledge base type detection failed
+
+stderr | src/vended-memory-stores/bedrock-knowledge-base/__tests__/bedrock-knowledge-base-store.test.node.ts &gt; BedrockKnowledgeBaseStore &gt; add — CUSTOM data source &gt; drops metadata keys that collide with scopeMetadataKey and preserves scope
+store=&lt;kb&gt;, key=&lt;namespace&gt; | dropping metadata key that collides with scopeMetadataKey
+
+stderr | src/vended-memory-stores/bedrock-knowledge-base/__tests__/bedrock-knowledge-base-store.test.node.ts &gt; BedrockKnowledgeBaseStore &gt; add — CUSTOM data source &gt; rewrites a missing-ACL ValidationException to point at the param
+store=&lt;kb&gt;, knowledgeBaseId=&lt;kb-1&gt;, dataSourceId=&lt;ds-1&gt;, dataSourceType=&lt;CUSTOM&gt;, error=&lt;ValidationException: accessControlList is required when ACL is enabled&gt; | knowledge base document ingestion failed ValidationException: accessControlList is required when ACL is enabled
+    at &lt;checkout&gt;/strands-ts/src/vended-memory-stores/bedrock-knowledge-base/__tests__/bedrock-knowledge-base-store.test.node.ts:749:33
+    at file://&lt;checkout&gt;/strands-ts/node_modules/@vitest/runner/dist/chunk-artifact.js:302:11
+    at file://&lt;checkout&gt;/strands-ts/node_modules/@vitest/runner/dist/chunk-artifact.js:1903:26
+    at file://&lt;checkout&gt;/strands-ts/node_modules/@vitest/runner/dist/chunk-artifact.js:2326:20
+    at new Promise (&lt;anonymous&gt;)
+    at runWithCancel (file://&lt;checkout&gt;/strands-ts/node_modules/@vitest/runner/dist/chunk-artifact.js:2323:10)
+    at file://&lt;checkout&gt;/strands-ts/node_modules/@vitest/runner/dist/chunk-artifact.js:2305:20
+    at new Promise (&lt;anonymous&gt;)
+    at runWithTimeout (file://&lt;checkout&gt;/strands-ts/node_modules/@vitest/runner/dist/chunk-artifact.js:2272:10)
+    at file://&lt;checkout&gt;/strands-ts/node_modules/@vitest/runner/dist/chunk-artifact.js:2956:64
+
+stderr | src/vended-memory-stores/bedrock-knowledge-base/__tests__/bedrock-knowledge-base-store.test.node.ts &gt; BedrockKnowledgeBaseStore &gt; add — CUSTOM data source &gt; does not rewrite when ACL is already configured
+store=&lt;kb&gt;, knowledgeBaseId=&lt;kb-1&gt;, dataSourceId=&lt;ds-1&gt;, dataSourceType=&lt;CUSTOM&gt;, error=&lt;ValidationException: accessControlList is invalid&gt; | knowledge base document ingestion failed ValidationException: accessControlList is invalid
+    at &lt;checkout&gt;/strands-ts/src/vended-memory-stores/bedrock-knowledge-base/__tests__/bedrock-knowledge-base-store.test.node.ts:759:33
+    at file://&lt;checkout&gt;/strands-ts/node_modules/@vitest/runner/dist/chunk-artifact.js:302:11
+    at file://&lt;checkout&gt;/strands-ts/node_modules/@vitest/runner/dist/chunk-artifact.js:1903:26
+    at file://&lt;checkout&gt;/strands-ts/node_modules/@vitest/runner/dist/chunk-artifact.js:2326:20
+    at new Promise (&lt;anonymous&gt;)
+    at runWithCancel (file://&lt;checkout&gt;/strands-ts/node_modules/@vitest/runner/dist/chunk-artifact.js:2323:10)
+    at file://&lt;checkout&gt;/strands-ts/node_modules/@vitest/runner/dist/chunk-artifact.js:2305:20
+    at new Promise (&lt;anonymous&gt;)
+    at runWithTimeout (file://&lt;checkout&gt;/strands-ts/node_modules/@vitest/runner/dist/chunk-artifact.js:2272:10)
+    at file://&lt;checkout&gt;/strands-ts/node_modules/@vitest/runner/dist/chunk-artifact.js:2956:64
+
+ ✓ |unit-node| src/vended-memory-stores/bedrock-knowledge-base/__tests__/bedrock-knowledge-base-store.test.node.ts (84 tests) 33ms
+ ✓ |unit-node| src/vended-interventions/hitl/__tests__/hitl.test.ts (23 tests) 37ms
+ ✓ |unit-node| src/mcp/__tests__/client-annotations.test.ts (4 tests) 31ms
+ ✓ |unit-node| src/vended-tools/web-fetch/__tests__/web-fetch.test.ts (29 tests) 26ms
+ ✓ |unit-node| src/models/__tests__/google.test.ts (84 tests) 22ms
+ ✓ |unit-node| src/context-manager/strategies/__tests__/offload-strategy.test.ts (44 tests) 26ms
+stderr | src/multiagent/__tests__/graph.tracer.test.ts &gt; Graph tracer integration &gt; multi-agent span lifecycle &gt; starts and ends multi-agent span on successful invocation
+graph has no maxSteps or timeout set; execution is unbounded
+
+stderr | src/a2a/__tests__/executor.test.ts &gt; A2AExecutor &gt; execute &gt; streams text deltas as artifact chunks and publishes completed status
+Passing a single 'agent' to A2AExecutor is deprecated and will be removed in a future version. A single agent serializes all requests; pass an agentFactory (a callable taking the contextId) instead to isolate conversations per context.
+
+stderr | src/multiagent/__tests__/graph.tracer.test.ts &gt; Graph tracer integration &gt; node span lifecycle &gt; ends node span with FAILED status when node agent throws
+node_id=&lt;a&gt;, error=&lt;agent exploded&gt; | node execution failed
+
+stderr | src/a2a/__tests__/executor.test.ts &gt; A2AExecutor &gt; execute &gt; sets append to true for subsequent chunks after the first
+Passing a single 'agent' to A2AExecutor is deprecated and will be removed in a future version. A single agent serializes all requests; pass an agentFactory (a callable taking the contextId) instead to isolate conversations per context.
+
+stderr | src/hooks/__tests__/events.test.ts
+model_id=&lt;global.anthropic.claude-sonnet-4-6&gt; | using default modelId, which is subject to change | set modelId explicitly to pin the value
+
+stderr | src/a2a/__tests__/executor.test.ts &gt; A2AExecutor &gt; execute &gt; converts A2A parts to content blocks and passes to stream
+Passing a single 'agent' to A2AExecutor is deprecated and will be removed in a future version. A single agent serializes all requests; pass an agentFactory (a callable taking the contextId) instead to isolate conversations per context.
+
+stderr | src/a2a/__tests__/executor.test.ts &gt; A2AExecutor &gt; execute &gt; forwards the A2A request context to the agent via invocationState
+Passing a single 'agent' to A2AExecutor is deprecated and will be removed in a future version. A single agent serializes all requests; pass an agentFactory (a callable taking the contextId) instead to isolate conversations per context.
+
+stderr | src/a2a/__tests__/executor.test.ts &gt; A2AExecutor &gt; execute &gt; re-throws when agent throws, publishing only the initial task event
+Passing a single 'agent' to A2AExecutor is deprecated and will be removed in a future version. A single agent serializes all requests; pass an agentFactory (a callable taking the contextId) instead to isolate conversations per context.
+
+ ✓ |unit-node| src/context-manager/__tests__/stash-integration.test.ts (17 tests) 25ms
+stderr | src/a2a/__tests__/executor.test.ts &gt; A2AExecutor &gt; execute &gt; re-throws when agent throws, publishing only the initial task event
+task_id=&lt;task-1&gt; | error in streaming execution ModelError: Agent failed
+    at MockMessageModel.streamAggregated (&lt;checkout&gt;/strands-ts/src/models/model.ts:659:13)
+    at processTicksAndRejections (node:internal/process/task_queues:104:5)
+    at Agent._streamFromModel (&lt;checkout&gt;/strands-ts/src/agent/agent.ts:2419:20)
+    at &lt;checkout&gt;/strands-ts/src/agent/agent.ts:2352:28
+    at Agent._invokeModelWithMiddleware (&lt;checkout&gt;/strands-ts/src/agent/agent.ts:2324:30)
+    at Agent._invokeModel (&lt;checkout&gt;/strands-ts/src/agent/agent.ts:2203:24)
+    at Agent._stream (&lt;checkout&gt;/strands-ts/src/agent/agent.ts:1689:33)
+    at Agent._streamCore (&lt;checkout&gt;/strands-ts/src/agent/agent.ts:1394:29)
+    at &lt;checkout&gt;/strands-ts/src/agent/agent.ts:1334:26
+    at Agent._streamWithMiddleware (&lt;checkout&gt;/strands-ts/src/agent/agent.ts:1327:26) {
+  [cause]: Error: Agent failed
+      at &lt;checkout&gt;/strands-ts/src/a2a/__tests__/executor.test.ts:159:52
+      at file://&lt;checkout&gt;/strands-ts/node_modules/@vitest/runner/dist/chunk-artifact.js:302:11
+      at file://&lt;checkout&gt;/strands-ts/node_modules/@vitest/runner/dist/chunk-artifact.js:1903:26
+      at file://&lt;checkout&gt;/strands-ts/node_modules/@vitest/runner/dist/chunk-artifact.js:2326:20
+      at new Promise (&lt;anonymous&gt;)
+      at runWithCancel (file://&lt;checkout&gt;/strands-ts/node_modules/@vitest/runner/dist/chunk-artifact.js:2323:10)
+      at file://&lt;checkout&gt;/strands-ts/node_modules/@vitest/runner/dist/chunk-artifact.js:2305:20
+      at new Promise (&lt;anonymous&gt;)
+      at runWithTimeout (file://&lt;checkout&gt;/strands-ts/node_modules/@vitest/runner/dist/chunk-artifact.js:2272:10)
+      at file://&lt;checkout&gt;/strands-ts/node_modules/@vitest/runner/dist/chunk-artifact.js:2956:64
+}
+
+stderr | src/a2a/__tests__/executor.test.ts &gt; A2AExecutor &gt; execute &gt; throws A2AError.invalidRequest when parts produce no content blocks
+Passing a single 'agent' to A2AExecutor is deprecated and will be removed in a future version. A single agent serializes all requests; pass an agentFactory (a callable taking the contextId) instead to isolate conversations per context.
+
+stderr | src/a2a/__tests__/executor.test.ts &gt; A2AExecutor &gt; cancelTask &gt; throws A2AError.unsupportedOperation
+Passing a single 'agent' to A2AExecutor is deprecated and will be removed in a future version. A single agent serializes all requests; pass an agentFactory (a callable taking the contextId) instead to isolate conversations per context.
+
+ ✓ |unit-node| src/middleware/__tests__/copy-on-input.test.ts (21 tests) 27ms
+stderr | src/a2a/__tests__/executor.test.ts &gt; A2AExecutor context isolation &gt; single-agent mode (deprecated) &gt; isolates history across contexts via snapshot swapping
+Passing a single 'agent' to A2AExecutor is deprecated and will be removed in a future version. A single agent serializes all requests; pass an agentFactory (a callable taking the contextId) instead to isolate conversations per context.
+
+ ✓ |unit-node| src/multiagent/__tests__/graph.tracer.test.ts (13 tests) 33ms
+ ✓ |unit-node| src/a2a/__tests__/executor.test.ts (16 tests) 32ms
+ok
+
+ ✓ |unit-node| src/hooks/__tests__/events.test.ts (100 tests) 30ms
+ok
+ok
+ok
+ok
+ ✓ |unit-node| src/agent/__tests__/agent-as-tool.test.ts (29 tests) 25ms
+ ✓ |unit-node| src/agent/__tests__/agent.model-retry.test.ts (11 tests) 26ms
+ ✓ |unit-node| src/agent/__tests__/snapshot.test.ts (30 tests) 24ms
+ ✓ |unit-node| src/conversation-manager/__tests__/token-usage-middleware.test.ts (15 tests) 28ms
+ ✓ |unit-node| src/tools/__tests__/tool.test.ts (57 tests) 19ms
+ ✓ |unit-node| src/tools/__tests__/zod-tool.test.ts (32 tests) 24ms
+stderr | src/models/__tests__/model.test.ts &gt; Model &gt; streamAggregated &gt; when streaming tool use &gt; throws MaxTokensError when contentBlockStop arrives with truncated tool input JSON and stopReason is maxTokens
+unable to parse tool input JSON SyntaxError: Expected ',' or '}' after property value in JSON at position 17 (line 1 column 18)
+    at JSON.parse (&lt;anonymous&gt;)
+    at TestModelProvider.streamAggregated (&lt;checkout&gt;/strands-ts/src/models/model.ts:531:54)
+    at streamAggregated.next (&lt;anonymous&gt;)
+    at collectGenerator (&lt;checkout&gt;/strands-ts/src/__fixtures__/model-test-helpers.ts:75:53)
+    at processTicksAndRejections (node:internal/process/task_queues:104:5)
+    at &lt;checkout&gt;/strands-ts/src/models/__tests__/model.test.ts:348:34
+    at &lt;checkout&gt;/strands-ts/src/models/__tests__/model.test.ts:348:9
+    at file://&lt;checkout&gt;/strands-ts/node_modules/@vitest/runner/dist/chunk-artifact.js:1903:20
+
+stderr | src/models/__tests__/model.test.ts &gt; Model &gt; streamAggregated &gt; when streaming tool use &gt; surfaces SyntaxError as cause when tool input JSON is malformed and stopReason is not maxTokens
+unable to parse tool input JSON SyntaxError: Expected property name or '}' in JSON at position 1 (line 1 column 2)
+    at JSON.parse (&lt;anonymous&gt;)
+    at TestModelProvider.streamAggregated (&lt;checkout&gt;/strands-ts/src/models/model.ts:531:54)
+    at streamAggregated.next (&lt;anonymous&gt;)
+    at collectGenerator (&lt;checkout&gt;/strands-ts/src/__fixtures__/model-test-helpers.ts:75:53)
+    at processTicksAndRejections (node:internal/process/task_queues:104:5)
+    at &lt;checkout&gt;/strands-ts/src/models/__tests__/model.test.ts:371:11
+    at file://&lt;checkout&gt;/strands-ts/node_modules/@vitest/runner/dist/chunk-artifact.js:1903:20
+
+stderr | src/models/__tests__/model.test.ts &gt; Model &gt; streamAggregated &gt; when streaming tool use &gt; attaches SyntaxError as cause when stream ends without a stop event after malformed tool input
+unable to parse tool input JSON SyntaxError: Expected property name or '}' in JSON at position 1 (line 1 column 2)
+    at JSON.parse (&lt;anonymous&gt;)
+    at TestModelProvider.streamAggregated (&lt;checkout&gt;/strands-ts/src/models/model.ts:531:54)
+    at streamAggregated.next (&lt;anonymous&gt;)
+    at collectGenerator (&lt;checkout&gt;/strands-ts/src/__fixtures__/model-test-helpers.ts:75:53)
+    at processTicksAndRejections (node:internal/process/task_queues:104:5)
+    at &lt;checkout&gt;/strands-ts/src/models/__tests__/model.test.ts:398:11
+    at file://&lt;checkout&gt;/strands-ts/node_modules/@vitest/runner/dist/chunk-artifact.js:1903:20
+
+stderr | src/models/__tests__/model.test.ts &gt; estimateUtilization &gt; uses DEFAULT_CONTEXT_WINDOW_LIMIT when contextWindowLimit is not set
+contextWindowLimit is not set on the model, using default of 200000 for utilization estimate | set contextWindowLimit in your model config for accurate results
+
+ ✓ |unit-node| src/models/__tests__/model.test.ts (41 tests) 21ms
+ ✓ |unit-node| src/background-tasks/in-process/__tests__/engine-execution.test.ts (5 tests) 21ms
+stderr | src/agent/__tests__/agent.model-routing.test.ts &gt; Agent model routing &gt; reports a downstream middleware model on failure
+maxSwitches=&lt;0&gt; | switch cap reached, leaving the error to surface
+
+stderr | src/agent/__tests__/agent.model-routing.test.ts &gt; Agent model routing &gt; honors maxSwitches zero and rejects plugin attachment
+maxSwitches=&lt;0&gt; | switch cap reached, leaving the error to surface
+
+stderr | src/context-manager/strategies/__tests__/summarize-strategy.test.ts &gt; Offload.summarize &gt; apply &gt; returns false when no model is available
+no model available for summarization
+
+ ✓ |unit-node| src/agent/__tests__/agent.model-routing.test.ts (10 tests) 29ms
+ ✓ |unit-node| src/context-manager/strategies/__tests__/summarize-strategy.test.ts (11 tests) 18ms
+ ✓ |unit-node| src/models/openai/__tests__/mantle.test.ts (57 tests) 17ms
+stderr | src/multiagent/__tests__/nodes.test.ts &gt; Node &gt; stream &gt; catches errors and returns FAILED NodeResult
+node_id=&lt;fail-node&gt;, error=&lt;boom&gt; | node execution failed
+
+ ✓ |unit-node| src/agent/__tests__/agent.cancel.test.ts (17 tests) 25ms
+ ✓ |unit-node| src/middleware/__tests__/middleware-interrupts.test.ts (15 tests) 23ms
+ ✓ |unit-node| src/multiagent/__tests__/nodes.test.ts (23 tests) 30ms
+ ✓ |unit-node| src/types/__tests__/messages.test.ts (88 tests) 17ms
+ ✓ |unit-node| src/sandbox/__tests__/posix-shell.test.node.ts (48 tests) 3081ms
+       ✓ reports the output captured before the kill on timeout  323ms
+stderr | src/multiagent/__tests__/swarm.invocation-state.test.ts &gt; Swarm invocationState forwarding &gt; forwards invocationState to every node and mutations from one node are visible to the next
+swarm has no maxSteps or timeout set; execution is unbounded
+
+Hello
+Hello
+Hello
+Hello
+Hello
+
+  ⏳ ping
+
+🔧 Tool #1: ping
+✓ Tool completed
+Done
+
+  ⏳ writer
+
+🔧 Tool #1: writer
+✓ Tool completed
+Done
+Hello
+A
+B
+stderr | src/vended-tools/a2a-client/__tests__/a2a-client.test.ts &gt; a2a-client tool &gt; discover &gt; returns the agent card as a plain object
+protocol=&lt;a2a&gt; | experimental, breaking changes in the underlying sdk may require breaking changes in this module
+
+ ✓ |unit-node| src/agent/__tests__/agent.checkpoint.test.ts (14 tests) 15ms
+ ✓ |unit-node| src/agent/__tests__/agent.invocation-state.test.ts (11 tests) 18ms
+ ✓ |unit-node| src/multiagent/__tests__/swarm.invocation-state.test.ts (2 tests) 16ms
+ ✓ |unit-node| src/vended-tools/a2a-client/__tests__/a2a-client.test.ts (20 tests) 15ms
+ ✓ |unit-node| src/vended-tools/notebook/__tests__/notebook.test.ts (62 tests) 15ms
+ ✓ |unit-node| src/vended-interventions/steering/__tests__/llm.test.ts (4 tests) 16ms
+ ✓ |unit-node| src/conversation-manager/__tests__/agentic-context.test.ts (30 tests) 17ms
+stderr | src/vended-plugins/context-injector/__tests__/plugin.test.ts &gt; ContextInjector &gt; registered handler &gt; fails open (passes context through) when renderContent throws
+reason=&lt;boom&gt; | injection renderContent threw; skipping injection
+
+ ✓ |unit-node| src/vended-tools/mcp-router/__tests__/mcp-router.test.ts (26 tests) 29ms
+Hello
+Hello
+ ✓ |unit-node| src/vended-tools/handoff-to-user/__tests__/handoff-to-user.test.ts (10 tests) 18ms
+ ✓ |unit-node| src/vended-plugins/context-injector/__tests__/plugin.test.ts (10 tests) 14ms
+stderr | src/conversation-manager/__tests__/sliding-window-conversation-manager.test.ts &gt; SlidingWindowConversationManager &gt; reduceContext - tool pair validation &gt; does not treat a user message containing tool use as an assistant tool-pair boundary
+window_size=&lt;4&gt;, messages=&lt;6&gt; | unable to trim conversation context, no valid trim point found
+
+stderr | src/conversation-manager/__tests__/sliding-window-conversation-manager.test.ts &gt; SlidingWindowConversationManager &gt; reduceContext - tool pair validation &gt; returns false when an assistant tool use is not followed by a tool result
+window_size=&lt;4&gt;, messages=&lt;6&gt; | unable to trim conversation context, no valid trim point found
+
+stderr | src/conversation-manager/__tests__/sliding-window-conversation-manager.test.ts &gt; SlidingWindowConversationManager &gt; reduceContext - tool pair validation &gt; returns false when no valid trim point exists
+window_size=&lt;1&gt;, messages=&lt;1&gt; | unable to trim conversation context, no valid trim point found
+
+stderr | src/conversation-manager/__tests__/sliding-window-conversation-manager.test.ts &gt; SlidingWindowConversationManager &gt; reduceContext - tool pair validation &gt; propagates the original ContextWindowOverflowError when reduce cannot reduce further
+window_size=&lt;1&gt;, messages=&lt;1&gt; | unable to trim conversation context, no valid trim point found
+
+stderr | src/conversation-manager/__tests__/sliding-window-conversation-manager.test.ts &gt; SlidingWindowConversationManager &gt; pinFirst &gt; returns false when all messages in trim range are protected
+window_size=&lt;2&gt;, messages=&lt;4&gt; | all messages in trim range are protected, unable to reduce
+
+ ✓ |unit-node| src/conversation-manager/__tests__/sliding-window-conversation-manager.test.ts (65 tests) 15ms
+
+  ⏳ inner
+
+🔧 Tool #1: inner
+inner-done
+✓ Tool completed
+outer-done
+ ✓ |unit-node| src/agent/__tests__/agent-as-tool.invocation-state.test.ts (1 test) 13ms
+stderr | src/models/routing/__tests__/router.test.ts &gt; ModelRouter &gt; failure routing &gt; consumes an unresolvable nested candidate and continues to a healthy candidate
+candidate=&lt;broken&gt;, error=&lt;Error: nested resolution failed&gt; | candidate could not be resolved, asking again
+
+stderr | src/models/routing/__tests__/router.test.ts &gt; ModelRouter &gt; failure routing &gt; stops when a strategy repeats an unresolvable candidate in the same round
+candidate=&lt;broken&gt;, error=&lt;Error: nested resolution failed&gt; | candidate could not be resolved, asking again
+
+stderr | src/models/routing/__tests__/router.test.ts &gt; ModelRouter &gt; failure routing &gt; does not replace a pending model error when strategy selection fails or repeats a used candidate
+strategy=&lt;Object&gt;, error=&lt;Error: routing failure&gt; | routing failed, leaving the error to surface
+
+stderr | src/models/routing/__tests__/router.test.ts &gt; ModelRouter &gt; failure routing &gt; honors maxSwitches as a cap on successful switches
+maxSwitches=&lt;0&gt; | switch cap reached, leaving the error to surface
+
+stderr | src/models/routing/__tests__/router.test.ts &gt; ModelRouter &gt; failure routing &gt; allows exactly maxSwitches successful candidate changes
+maxSwitches=&lt;1&gt; | switch cap reached, leaving the error to surface
+
+ ✓ |unit-node| src/models/routing/__tests__/router.test.ts (27 tests) 15ms
+ ✓ |unit-node| src/telemetry/__tests__/meter.test.ts (62 tests) 15ms
+ ✓ |unit-node| src/session/__tests__/s3-storage.test.ts (35 tests) 13ms
+stderr | src/memory/__tests__/memory-tracing.test.ts &gt; memory tracing &gt; search &gt; counts a per-store failure but ends the span OK (not an error)
+store=&lt;bad&gt;, reason=&lt;boom&gt; | store search failed
+
+stderr | src/memory/__tests__/memory-tracing.test.ts &gt; memory tracing &gt; add &gt; ends the span with the AggregateError when a write fails
+store=&lt;personal&gt;, reason=&lt;disk full&gt; | store write failed
+
+stderr | src/memory/__tests__/memory-tracing.test.ts &gt; memory tracing &gt; injection &gt; fails open with formatError=true when the format callback throws
+reason=&lt;bad format&gt; | injection format threw; skipping injection
+
+stderr | src/memory/__tests__/memory-tracing.test.ts &gt; memory tracing &gt; injection &gt; fails open (ends injected=false) when the query callback throws
+reason=&lt;query exploded&gt; | injection query threw; skipping injection
+
+stderr | src/memory/__tests__/memory-tracing.test.ts &gt; memory tracing &gt; extraction coordinator &gt; ends the extract span with the error and swallows the failure
+store=&lt;personal&gt;, reason=&lt;backend down&gt; | memory extraction failed
+
+ ✓ |unit-node| src/memory/__tests__/memory-tracing.test.ts (17 tests) 12ms
+stderr | src/context-manager/__tests__/context-manager.test.ts &gt; ContextManager &gt; overflow path &gt; caps retries at 3 and stops setting retry
+agentId=&lt;test-agent&gt; | overflow retry limit reached, giving up
+
+stderr | src/context-manager/__tests__/context-manager.test.ts &gt; ContextManager &gt; truncation &gt; does not truncate when messages &lt;= 3
+agentId=&lt;test-agent&gt; | no strategy made progress, skipping retry
+
+ ✓ |unit-node| src/context-manager/__tests__/context-manager.test.ts (16 tests) 10ms
+stderr | src/agent/__tests__/agent.context-manager.test.ts &gt; Agent contextManager &gt; when "auto" &gt; registers ContextManager as a plugin
+contextWindowLimit is not set on the model, using default of 200000 for utilization estimate | set contextWindowLimit in your model config for accurate results
+
+hi
+stderr | src/agent/__tests__/agent.context-manager.test.ts &gt; Agent contextManager &gt; when "auto" &gt; ignores user-provided conversationManager
+contextManager is set, ignoring co-provided conversationManager
+
+hi
+hi
+stderr | src/multiagent/__tests__/graph.invocation-state.test.ts &gt; Graph invocationState forwarding &gt; forwards invocationState to every node and mutations from one node are visible to the next
+graph has no maxSteps or timeout set; execution is unbounded
+
+ ✓ |unit-node| src/agent/__tests__/agent.context-manager.test.ts (16 tests) 16ms
+ ✓ |unit-node| src/agent/__tests__/agent.continuation.test.ts (5 tests) 20ms
+ ✓ |unit-node| src/vended-memory-stores/file-memory-store/__tests__/file-memory-store.test.node.ts (40 tests) 15ms
+stderr | src/conversation-manager/__tests__/conversation-manager.test.ts &gt; ConversationManager &gt; proactiveCompression &gt; swallows errors from proactive reduce and continues
+conversation_manager=&lt;test:throwing&gt; | proactive compression failed, continuing | error=&lt;Error: proactive compression exploded&gt;
+
+ ✓ |unit-node| src/multiagent/__tests__/graph.invocation-state.test.ts (3 tests) 17ms
+ ✓ |unit-node| src/agent/__tests__/printer.test.ts (9 tests) 18ms
+ ✓ |unit-node| src/types/__tests__/json.test.ts (39 tests) 12ms
+ ✓ |unit-node| src/conversation-manager/__tests__/conversation-manager.test.ts (18 tests) 16ms
+stderr | src/agent/__tests__/agent.storage.test.ts &gt; Agent storage &gt; agent-level storage flows to ContextManager stash &gt; auto-created ContextManager uses agent storage when provided
+contextWindowLimit is not set on the model, using default of 200000 for utilization estimate | set contextWindowLimit in your model config for accurate results
+
+hi
+hi
+hi
+hi
+stderr | src/multiagent/__tests__/spec.test.ts &gt; _defaultBuilder &gt; inherits MCP clients once per server and respects server selection
+server_name=&lt;unknown&gt; | subagent requested MCP server but parent does not own it, skipping
+
+ ✓ |unit-node| src/agent/__tests__/agent.storage.test.ts (7 tests) 17ms
+ ✓ |unit-node| src/agent/__tests__/tool-caller.test.ts (26 tests) 13ms
+ ✓ |unit-node| src/multiagent/__tests__/spec.test.ts (25 tests) 15ms
+ ✓ |unit-node| src/agent/__tests__/agent.stateful-model.test.ts (12 tests) 17ms
+ ✓ |unit-node| src/conversation-manager/__tests__/context-compression.test.ts (32 tests) 11ms
+ ✓ |unit-node| src/tools/__tests__/structured-output-tool.test.ts (9 tests) 11ms
+ ✓ |unit-node| src/retry/__tests__/default-model-retry-strategy.test.ts (14 tests) 13ms
+ ✓ |unit-node| src/types/__tests__/media.test.ts (51 tests) 13ms
+stderr | src/memory/extraction/__tests__/model-extractor.test.ts &gt; ModelExtractor &gt; returns no entries on malformed JSON without throwing
+model=&lt;MockMessageModel&gt; | ModelExtractor: no JSON array in model output, skipping
+
+stderr | src/models/__tests__/cache-portability.test.ts &gt; cacheConfig portability across providers &gt; agrees on both sections by default
+max_tokens=&lt;64000&gt; | using default maxTokens, which is subject to change | set maxTokens explicitly to pin the value
+
+stderr | src/vended-interventions/steering/__tests__/handler.test.ts &gt; SteeringHandler &gt; routes beforeToolCall to subclass override with the event
+model_id=&lt;global.anthropic.claude-sonnet-4-6&gt; | using default modelId, which is subject to change | set modelId explicitly to pin the value
+
+ ✓ |unit-node| src/memory/extraction/__tests__/model-extractor.test.ts (11 tests) 14ms
+ ✓ |unit-node| src/models/__tests__/cache-portability.test.ts (7 tests) 14ms
+ ✓ |unit-node| src/vended-interventions/steering/__tests__/handler.test.ts (7 tests) 20ms
+ ✓ |unit-node| src/experimental/vended-tools/stop/__tests__/stop.test.ts (21 tests) 13ms
+ ✓ |unit-node| src/background-tasks/in-process/__tests__/engine-transitions.test.ts (5 tests) 12ms
+ ✓ |unit-node| src/session/__tests__/snapshot-storage-adapter.test.ts (24 tests) 10ms
+stderr | src/vended-interventions/steering/__tests__/tool-ledger.test.ts &gt; ToolLedgerProvider &gt; records pending entry on beforeToolCall
+model_id=&lt;global.anthropic.claude-sonnet-4-6&gt; | using default modelId, which is subject to change | set modelId explicitly to pin the value
+
+stderr | src/multiagent/__tests__/snapshot.test.ts &gt; multiagent snapshot &gt; takeSnapshot &gt; captures orchestratorId, serialized state, and appData
+graph has no maxSteps or timeout set; execution is unbounded
+
+stderr | src/multiagent/__tests__/snapshot.test.ts &gt; multiagent snapshot &gt; takeSnapshot &gt; works with Swarm orchestrator
+swarm has no maxSteps or timeout set; execution is unbounded
+
+ ✓ |unit-node| src/injection/__tests__/message-injection.test.ts (31 tests) 13ms
+ ✓ |unit-node| src/vended-interventions/steering/__tests__/tool-ledger.test.ts (4 tests) 10ms
+ ✓ |unit-node| src/multiagent/__tests__/snapshot.test.ts (9 tests) 13ms
+ ✓ |unit-node| src/sandbox/__tests__/ssh.test.node.ts (21 tests) 8ms
+stderr | src/a2a/__tests__/a2a-agent.test.ts &gt; A2AAgent &gt; identity properties &gt; populates name and description from agent card on first connection
+protocol=&lt;a2a&gt; | experimental, breaking changes in the underlying sdk may require breaking changes in this module
+
+ ✓ |unit-node| src/a2a/__tests__/a2a-agent.test.ts (29 tests) 10ms
+ ✓ |unit-node| src/storage/search/__tests__/qmd.test.node.ts (9 tests) 9ms
+ ✓ |unit-node| src/multiagent/__tests__/state.test.ts (41 tests) 9ms
+ ✓ |unit-node| src/telemetry/__tests__/local-trace.test.ts (16 tests) 9ms
+ ✓ |unit-node| src/plugins/__tests__/registry.test.ts (10 tests) 6ms
+stderr | src/a2a/__tests__/server.test.node.ts &gt; A2AExpressServer &gt; constructor &gt; builds agent card with default values
+Passing a single 'agent' to A2AExecutor is deprecated and will be removed in a future version. A single agent serializes all requests; pass an agentFactory (a callable taking the contextId) instead to isolate conversations per context.
+
+stderr | src/a2a/__tests__/server.test.node.ts &gt; A2AExpressServer &gt; constructor &gt; uses custom config values
+Passing a single 'agent' to A2AExecutor is deprecated and will be removed in a future version. A single agent serializes all requests; pass an agentFactory (a callable taking the contextId) instead to isolate conversations per context.
+
+stderr | src/a2a/__tests__/server.test.node.ts &gt; A2AExpressServer &gt; constructor &gt; uses httpUrl override when provided
+Passing a single 'agent' to A2AExecutor is deprecated and will be removed in a future version. A single agent serializes all requests; pass an agentFactory (a callable taking the contextId) instead to isolate conversations per context.
+
+stderr | src/a2a/__tests__/server.test.node.ts &gt; A2AExpressServer &gt; constructor &gt; accepts custom taskStore
+Passing a single 'agent' to A2AExecutor is deprecated and will be removed in a future version. A single agent serializes all requests; pass an agentFactory (a callable taking the contextId) instead to isolate conversations per context.
+
+stderr | src/a2a/__tests__/server.test.node.ts &gt; A2AExpressServer &gt; constructor &gt; is an instance of A2AServer
+Passing a single 'agent' to A2AExecutor is deprecated and will be removed in a future version. A single agent serializes all requests; pass an agentFactory (a callable taking the contextId) instead to isolate conversations per context.
+
+stderr | src/a2a/__tests__/server.test.node.ts &gt; A2AExpressServer &gt; createMiddleware &gt; returns an express router with SDK middleware
+Passing a single 'agent' to A2AExecutor is deprecated and will be removed in a future version. A single agent serializes all requests; pass an agentFactory (a callable taking the contextId) instead to isolate conversations per context.
+protocol=&lt;a2a&gt; | experimental, breaking changes in the underlying sdk may require breaking changes in this module
+
+stderr | src/a2a/__tests__/server.test.ts &gt; A2AServer &gt; constructor &gt; builds agent card with provided values
+Passing a single 'agent' to A2AExecutor is deprecated and will be removed in a future version. A single agent serializes all requests; pass an agentFactory (a callable taking the contextId) instead to isolate conversations per context.
+
+stderr | src/a2a/__tests__/server.test.ts &gt; A2AServer &gt; constructor &gt; uses default values when optional config is omitted
+Passing a single 'agent' to A2AExecutor is deprecated and will be removed in a future version. A single agent serializes all requests; pass an agentFactory (a callable taking the contextId) instead to isolate conversations per context.
+
+stderr | src/a2a/__tests__/server.test.ts &gt; A2AServer &gt; constructor &gt; accepts custom taskStore
+Passing a single 'agent' to A2AExecutor is deprecated and will be removed in a future version. A single agent serializes all requests; pass an agentFactory (a callable taking the contextId) instead to isolate conversations per context.
+
+ ✓ |unit-node| src/sandbox/__tests__/docker.test.node.ts (9 tests) 6ms
+ ✓ |unit-node| src/context-manager/__tests__/retrieval-tool.test.ts (8 tests) 10ms
+ ✓ |unit-node| src/a2a/__tests__/server.test.node.ts (6 tests) 9ms
+ ✓ |unit-node| src/a2a/__tests__/server.test.ts (6 tests) 7ms
+ ✓ |unit-node| src/__tests__/errors.test.ts (25 tests) 6ms
+ ✓ |unit-node| src/middleware/__tests__/registry.test.ts (24 tests) 9ms
+stderr | src/conversation-manager/__tests__/summarizing-conversation-manager.test.ts &gt; SummarizingConversationManager &gt; reduce &gt; returns false when there are not enough messages to summarize
+preserve_recent=&lt;10&gt;, messages=&lt;8&gt; | insufficient messages for summarization
+
+stderr | src/conversation-manager/__tests__/summarizing-conversation-manager.test.ts &gt; SummarizingConversationManager &gt; reduce &gt; rethrows model errors with the overflow error as cause
+error=&lt;ModelError: model failed&gt; | summarization failed
+
+stderr | src/conversation-manager/__tests__/summarizing-conversation-manager.test.ts &gt; SummarizingConversationManager &gt; reduce &gt; wraps non-Error throw values with the overflow error as cause
+error=&lt;string error&gt; | summarization failed
+
+stderr | src/conversation-manager/__tests__/summarizing-conversation-manager.test.ts &gt; SummarizingConversationManager &gt; tool pair adjustment &gt; throws when no valid split point exists
+error=&lt;Error: Unable to find valid split point for summarization&gt; | summarization failed
+
+stderr | src/conversation-manager/__tests__/summarizing-conversation-manager.test.ts &gt; SummarizingConversationManager &gt; reduceOnThreshold &gt; returns false and does not throw when summarization fails
+error=&lt;ModelError: model failed&gt; | proactive summarization failed, continuing
+
+stderr | src/conversation-manager/__tests__/summarizing-conversation-manager.test.ts &gt; SummarizingConversationManager &gt; pinFirst &gt; returns false when all messages in summary range are protected
+messages=&lt;6&gt; | all messages in summarize range are protected, unable to reduce
+
+ ✓ |unit-node| src/conversation-manager/__tests__/summarizing-conversation-manager.test.ts (19 tests) 10ms
+ ✓ |unit-node| src/storage/search/__tests__/keyword.test.ts (7 tests) 5ms
+stderr | src/models/__tests__/strict-schema.test.ts &gt; ensureStrictJsonSchema &gt; ignores a $ref that does not start with #/ but still closes the root
+ref=&lt;external.json#/Foo&gt; | unexpected $ref format, skipping resolution
+
+stderr | src/models/__tests__/strict-schema.test.ts &gt; ensureStrictJsonSchema &gt; ignores a $ref pointing at a missing path but still closes the root
+ref=&lt;#/$defs/Missing&gt; | failed to resolve $ref path
+
+stderr | src/models/__tests__/strict-schema.test.ts &gt; ensureStrictJsonSchema &gt; does not resolve a $ref through the prototype chain
+ref=&lt;#/$defs/__proto__&gt; | failed to resolve $ref path
+
+ ✓ |unit-node| src/models/__tests__/strict-schema.test.ts (24 tests) 8ms
+ ✓ |unit-node| src/registry/__tests__/tool-registry.test.ts (33 tests) 8ms
+ ✓ |unit-node| src/plugins/__tests__/plugin.test.ts (7 tests) 6ms
+ ✓ |unit-node| src/storage/__tests__/s3-storage.test.ts (13 tests) 7ms
+ ✓ |unit-node| src/__tests__/state-store.test.ts (49 tests) 6ms
+ ✓ |unit-node| src/conversation-manager/__tests__/pin.test.ts (16 tests) 7ms
+ ✓ |unit-node| src/__tests__/interrupt.test.ts (20 tests) 6ms
+ ✓ |unit-node| src/telemetry/__tests__/json.test.ts (15 tests) 5ms
+ ✓ |unit-node| src/storage/__tests__/in-memory-storage.test.ts (16 tests) 5ms
+ ✓ |unit-node| src/multiagent/__tests__/events.test.ts (38 tests) 6ms
+stdout | src/types/__tests__/agent.test.ts &gt; AgentResult &gt; toString &gt; when content has only non-text blocks &gt; returns empty string
+Skipping content block type: toolUseBlock
+Skipping content block type: toolResultBlock
+Skipping content block type: cachePointBlock
+
+stdout | src/types/__tests__/agent.test.ts &gt; AgentResult &gt; toString &gt; when content has mixed text and non-text blocks &gt; returns only text from TextBlock and ReasoningBlock
+Skipping content block type: toolUseBlock
+Skipping content block type: cachePointBlock
+
+ ✓ |unit-node| src/types/__tests__/agent.test.ts (30 tests) 8ms
+stderr | src/logging/__tests__/logger.test.ts &gt; default logger &gt; logs warnings to console.warn
+Warning message arg1 arg2
+
+stderr | src/logging/__tests__/logger.test.ts &gt; default logger &gt; logs errors to console.error
+Error message arg1 arg2
+
+ ✓ |unit-node| src/logging/__tests__/logger.test.ts (6 tests) 5ms
+ ✓ |unit-node| src/retry/__tests__/backoff-strategy.test.ts (19 tests) 5ms
+ ✓ |unit-node| src/tools/executors/__tests__/executor.cancel-signal.test.ts (3 tests) 8ms
+ ✓ |unit-node| src/vended-plugins/context-offloader/__tests__/search.test.ts (26 tests) 7ms
+ ✓ |unit-node| src/session/__tests__/validation.test.ts (10 tests) 5ms
+ ✓ |unit-node| src/tools/__tests__/tool-factory.test.ts (8 tests) 7ms
+ ✓ |unit-node| src/models/openai/__tests__/errors.test.ts (14 tests) 3ms
+ ✓ |unit-node| src/__tests__/mime.test.ts (52 tests) 4ms
+ ✓ |unit-node| src/context-manager/__tests__/presets.test.ts (20 tests) 6ms
+ ✓ |unit-node| src/memory/extraction/__tests__/resolve-extraction-config.test.ts (13 tests) 5ms
+ ✓ |unit-node| src/a2a/__tests__/adapters.test.ts (22 tests) 6ms
+ ✓ |unit-node| src/context-manager/__tests__/stash.test.ts (8 tests) 5ms
+ ✓ |unit-node| src/experimental/__tests__/checkpoint.test.ts (6 tests) 6ms
+ ✓ |unit-node| src/storage/__tests__/namespaced-storage.test.ts (10 tests) 4ms
+ ✓ |unit-node| src/__tests__/queue.test.ts (10 tests) 4ms
+ ✓ |unit-node| src/__tests__/default-slot.test.ts (4 tests) 3ms
+ ✓ |unit-node| src/logging/__tests__/warn-once.test.ts (3 tests) 3ms
+ ✓ |unit-node| src/sandbox/__tests__/errors.test.node.ts (8 tests) 3ms
+ ✓ |unit-node| src/types/__tests__/citations.test.ts (6 tests) 8ms
+ ✓ |unit-node| src/middleware/__tests__/custom-stages.test.ts (5 tests) 4ms
+ ✓ |unit-node| src/models/__tests__/streaming.test.ts (14 tests) 3ms
+stderr | src/__tests__/index.test.ts &gt; index &gt; when importing from main entry point &gt; can instantiate BedrockModel
+model_id=&lt;global.anthropic.claude-sonnet-4-6&gt; | using default modelId, which is subject to change | set modelId explicitly to pin the value
+
+ ✓ |unit-node| src/multiagent/__tests__/plugins.test.ts (1 test) 3ms
+ ✓ |unit-node| src/models/__tests__/defaults.test.ts (5 tests) 2ms
+ ✓ |unit-node| src/__tests__/index.test.ts (9 tests) 7ms
+ ✓ |unit-node| src/types/__tests__/validation.test.ts (5 tests) 3ms
+ ✓ |unit-node| src/models/routing/__tests__/fallback-strategy.test.ts (5 tests) 3ms
+ ✓ |unit-node| src/a2a/__tests__/events.test.ts (6 tests) 3ms
+ ✓ |unit-node| src/sandbox/__tests__/default.test.node.ts (4 tests) 3ms
+ ✓ |unit-node| src/conversation-manager/__tests__/null-conversation-manager.test.ts (4 tests) 3ms
+stderr | src/interventions/__tests__/handler.test.ts
+model_id=&lt;global.anthropic.claude-sonnet-4-6&gt; | using default modelId, which is subject to change | set modelId explicitly to pin the value
+
+ ✓ |unit-node| src/interventions/__tests__/handler.test.ts (2 tests) 2ms
+ ✓ |unit-node|  TS  src/tools/__tests__/zod-tool.test-d.ts (20 tests)
+
+ Test Files  179 passed (179)
+      Tests  5028 passed (5028)
+Type Errors  no errors
+   Start at  00:19:46
+   Duration  7.60s (transform 9.54s, setup 4.03s, import 38.39s, tests 14.23s, environment 10ms, typecheck 1.25s)
+
+JSON report written to &lt;checkout&gt;/strands-ts/test/.artifacts/test-report/json/report.json
+JUNIT report written to &lt;checkout&gt;/strands-ts/test/.artifacts/test-report/junit/report.xml
+ % Coverage report from v8
+-------------------|---------|----------|---------|---------|-------------------
+File               | % Stmts | % Branch | % Funcs | % Lines | Uncovered Line #s 
+-------------------|---------|----------|---------|---------|-------------------
+All files          |   93.26 |     88.3 |   95.74 |   94.02 |                   
+ src               |   95.53 |     94.8 |   96.92 |   95.37 |                   
+  index.node.ts    |       0 |      100 |     100 |       0 | 7                 
+  interrupt.ts     |   94.56 |     93.1 |   95.83 |   94.38 | 249-254,471       
+  ...e-defaults.ts |       0 |      100 |       0 |       0 | 8-9               
+ src/a2a           |   90.52 |    84.61 |    90.9 |    90.2 |                   
+  a2a-agent.ts     |   94.84 |    91.13 |     100 |   94.04 | ...27,249,289,294 
+  adapters.ts      |    89.7 |     74.5 |     100 |   88.88 | ...41,157,177,197 
+  async-lock.ts    |    92.3 |       50 |     100 |     100 | 33                
+  executor.ts      |   98.73 |    89.74 |     100 |   98.73 | 53                
+  ...ess-server.ts |   44.44 |    57.14 |   28.57 |   44.44 | 65,101-121        
+  server.ts        |     100 |    95.23 |     100 |     100 | 113               
+ src/agent         |   97.24 |    95.04 |   98.13 |   97.85 |                   
+  agent-as-tool.ts |   98.03 |    95.52 |     100 |      98 | 248,251           
+  ...delegation.ts |   95.06 |     93.1 |     100 |   95.71 | 237,265-268       
+  agent.ts         |   97.98 |    95.86 |   98.88 |    98.2 | ...2195,2223,2485 
+  continuation.ts  |   90.66 |    92.53 |     100 |   95.38 | 131,149,201       
+  printer.ts       |    97.1 |     87.5 |   92.85 |   98.48 | 20                
+  tool-caller.ts   |   95.23 |    93.75 |    90.9 |   95.23 | 145,232           
+ ...ckground-tasks |   85.99 |    81.59 |   90.38 |    86.7 |                   
+  ...ound-tasks.ts |   85.27 |    80.51 |   89.58 |   85.88 | ...75,283-297,410 
+ ...sks/in-process |   94.37 |    84.25 |     100 |   97.26 |                   
+  engine.ts        |   93.91 |       80 |     100 |   96.99 | 91,169,174,204    
+  manager.ts       |   95.04 |    88.05 |     100 |   97.67 | 145,221           
+ ...ontext-manager |   95.02 |    88.97 |     100 |   96.04 |                   
+  ...xt-manager.ts |   97.56 |    94.11 |     100 |    98.7 | 226               
+  ...ieval-tool.ts |   90.69 |     85.1 |     100 |   91.66 | 77,106,125        
+  stash.ts         |   93.54 |    80.95 |     100 |      94 | 89,111,197        
+ ...anager/methods |   55.42 |    32.69 |      70 |   58.22 |                   
+  summarize.ts     |   32.55 |    10.71 |   57.14 |   35.89 | ...,81,99,111-145 
+  truncate.ts      |      80 |    58.33 |     100 |      80 | ...8-81,86,93,110 
+ .../modes/agentic |   95.72 |    87.05 |    92.3 |   96.22 |                   
+  ...ic-context.ts |   95.72 |    87.05 |    92.3 |   96.22 | 111,173,286,291   
+ ...tegies/offload |   83.11 |    75.19 |   96.36 |   89.32 |                   
+  base.ts          |   84.25 |    78.01 |   94.44 |      89 | ...14,472-486,550 
+  summarize.ts     |    75.8 |       60 |     100 |   88.46 | 124-131           
+  truncate.ts      |   81.63 |    69.69 |     100 |   88.37 | 40,89,97-98,118   
+ ...sation-manager |    98.8 |    94.85 |     100 |   99.15 |                   
+  ...on-manager.ts |   98.46 |    93.38 |     100 |   98.88 | 326,331           
+ ...er/compression |   98.34 |    91.25 |     100 |   98.98 |                   
+  ...ompression.ts |   97.36 |    93.47 |     100 |   98.41 | 197               
+  pin-message.ts   |     100 |    88.23 |     100 |     100 | 24,36,102-103     
+ src/hooks         |   98.82 |    97.36 |      98 |   99.39 |                   
+  events.ts        |    99.2 |      100 |   97.56 |    99.2 | 724               
+  registry.ts      |   97.72 |    95.45 |     100 |     100 | 67                
+ src/interventions |   79.28 |    76.81 |   81.08 |    77.6 |                   
+  actions.ts       |    90.9 |      100 |   83.33 |   88.88 | 203               
+  handler.ts       |      50 |      100 |      40 |      50 | 49,57-61          
+  registry.ts      |    79.5 |    75.38 |   88.46 |   77.98 | ...95-196,255-256 
+ src/mcp           |   86.15 |    78.65 |   89.11 |    88.3 |                   
+  client.ts        |   91.48 |    81.72 |   92.55 |   92.99 | ...1262,1342-1361 
+  config.node.ts   |   96.62 |    95.23 |     100 |   97.18 | 61-62             
+  ...-transport.ts |   69.45 |    62.17 |    77.5 |   74.03 | ...22,428,441-445 
+ src/memory        |   99.21 |    96.05 |     100 |   99.13 |                   
+  ...ry-manager.ts |   99.21 |    96.05 |     100 |   99.13 | 144,202           
+ ...ory/extraction |   95.26 |    88.23 |     100 |   94.85 |                   
+  coordinator.ts   |   97.16 |    83.33 |     100 |    96.8 | 232-233,324       
+  ...-extractor.ts |   89.47 |    87.23 |     100 |   89.09 | 88-90,135-136,140 
+ src/middleware    |     100 |       95 |     100 |     100 |                   
+  registry.ts      |     100 |    91.66 |     100 |     100 | 103               
+ src/models        |   93.69 |    87.78 |   99.45 |   94.28 |                   
+  anthropic.ts     |   91.19 |    87.08 |     100 |   92.16 | ...66-968,976-977 
+  bedrock.ts       |   92.88 |    85.93 |   98.68 |    94.1 | ...2013,2153,2218 
+  model.ts         |   97.75 |     92.3 |     100 |   97.61 | 424,604,749-750   
+  streaming.ts     |   94.59 |    85.71 |     100 |   94.59 | 223,286           
+  strict-schema.ts |    94.2 |       95 |     100 |   93.93 | 147-148,154-155   
+  vercel.ts        |   95.18 |    89.09 |     100 |   94.77 | ...66,947-950,978 
+ src/models/google |   89.13 |     81.9 |     100 |   89.05 |                   
+  adapters.ts      |   89.88 |     82.7 |     100 |   89.82 | ...91,396,458-459 
+  errors.ts        |   84.21 |    58.33 |     100 |   84.21 | 55,72,88          
+  model.ts         |   88.75 |    84.21 |     100 |    88.6 | 259,295-305,348   
+ src/models/openai |   88.19 |    82.32 |   94.82 |   88.53 |                   
+  cache.ts         |     100 |    91.17 |     100 |     100 | 51                
+  chat-adapter.ts  |    84.1 |    78.57 |   91.66 |   85.16 | ...50-358,391-392 
+  errors.ts        |     100 |     92.3 |     100 |     100 | 41                
+  formatting.ts    |   91.66 |       80 |     100 |    90.9 | 41                
+  mantle.ts        |   96.55 |      100 |     100 |   96.42 | 186               
+  model.ts         |   96.96 |    95.45 |      90 |    96.9 | 78,125,149        
+  ...es-adapter.ts |    84.4 |    74.34 |   94.11 |   84.61 | ...97,509-510,562 
+ ...models/routing |   97.89 |    96.19 |    98.5 |   98.56 |                   
+  ...r-strategy.ts |     100 |    98.52 |     100 |     100 | 293               
+  router.ts        |   96.56 |    94.53 |   97.67 |   97.67 | 356,497,578,596   
+ src/multiagent    |   97.53 |    93.62 |   98.38 |   97.52 |                   
+  events.ts        |   98.64 |    83.33 |     100 |   98.64 | 118               
+  graph.ts         |   98.15 |    95.85 |     100 |   97.95 | ...46,754-755,815 
+  multiagent.ts    |   97.82 |    89.28 |     100 |    97.5 | 114               
+  nodes.ts         |     100 |     93.9 |     100 |     100 | ...06,326,337-390 
+  plugins.ts       |    90.9 |    66.66 |     100 |    90.9 | 91                
+  spec.ts          |    97.1 |    90.98 |     100 |   96.89 | 260,264,278,340   
+  state.ts         |   97.43 |    94.73 |   94.44 |      97 | 238,252,295       
+  swarm.ts         |   95.86 |    93.25 |   96.42 |   96.47 | ...51,354,460,499 
+ src/registry      |     100 |    97.22 |     100 |     100 |                   
+  tool-registry.ts |     100 |    97.22 |     100 |     100 | 92                
+ src/retry         |     100 |    98.48 |     100 |     100 |                   
+  ...y-strategy.ts |     100 |    95.23 |     100 |     100 | 129               
+ src/sandbox       |   94.34 |    86.25 |   95.83 |   94.83 |                   
+  base.ts          |   72.72 |      100 |      80 |   72.72 | 120,141,161       
+  docker.ts        |     100 |       90 |     100 |     100 | 84                
+  ...nvironment.ts |   90.62 |    88.23 |     100 |      90 | 14,88,97          
+  posix-shell.ts   |   95.74 |    77.14 |     100 |   95.34 | 94,113            
+  ...am-process.ts |   94.11 |     85.1 |    90.9 |   96.05 | 84,109,121        
+ src/session       |   96.73 |    91.38 |     100 |   98.09 |                   
+  file-storage.ts  |   97.22 |    92.85 |     100 |   98.52 | 219               
+  s3-storage.ts    |   92.68 |    81.53 |     100 |   96.05 | 162-165           
+  ...on-manager.ts |   97.43 |    95.45 |     100 |   98.19 | 161,400           
+ src/storage       |   76.82 |    68.37 |   75.51 |   78.24 |                   
+  ...ry-storage.ts |    82.6 |     62.5 |    87.5 |   80.95 | 53,109-112        
+  ...le-storage.ts |   66.36 |    55.35 |   76.47 |   68.31 | ...64,202,221-260 
+  s3-storage.ts    |   87.71 |    72.41 |   77.77 |    90.9 | 77,166-169,181    
+  storage.ts       |   86.04 |    95.83 |   66.66 |   84.61 | 60,201,209-212    
+ ...storage/search |   93.65 |    84.61 |     100 |   98.07 |                   
+  keyword.ts       |   95.83 |     87.5 |     100 |     100 | 173               
+  qmd.ts           |    92.3 |    83.33 |     100 |   96.96 | 105               
+ src/telemetry     |   91.12 |    91.08 |    92.4 |   91.58 |                   
+  config.ts        |   85.93 |    76.19 |   33.33 |   86.44 | ...92-193,262-264 
+  json.ts          |      75 |     87.5 |     100 |      75 | 13                
+  meter.ts         |     100 |    96.42 |     100 |     100 | 277,560           
+  tracer.ts        |   90.14 |    92.36 |     100 |   90.52 | ...1313,1334,1354 
+ src/tools         |   96.57 |    93.23 |     100 |   96.49 |                   
+  function-tool.ts |   96.77 |    93.87 |     100 |   96.55 | 265,284           
+  mcp-tool.ts      |   93.22 |    92.98 |     100 |   93.22 | 116,126,176,208   
+  ...utput-tool.ts |     100 |       75 |     100 |     100 | 67                
+  zod-tool.ts      |     100 |    92.85 |     100 |     100 | 80                
+ ...ools/executors |   99.32 |    92.18 |     100 |    99.3 |                   
+  concurrent.ts    |   98.11 |    94.44 |     100 |   98.03 | 120               
+  executor.ts      |     100 |     92.5 |     100 |     100 | 232,326-341       
+  sequential.ts    |     100 |    83.33 |     100 |     100 | 69                
+ src/types         |   95.76 |    94.37 |     100 |   96.23 |                   
+  agent.ts         |     100 |    96.42 |     100 |     100 | 599               
+  json.ts          |     100 |    85.18 |     100 |     100 | 59,83-85,119      
+  media.ts         |   89.43 |    96.05 |     100 |   90.83 | 28-37,44,60-65    
+  messages.ts      |   98.52 |    94.11 |     100 |   98.46 | 908,911           
+ ...ventions/cedar |   88.63 |    85.57 |   83.33 |   90.47 |                   
+  cedar.ts         |    87.5 |     85.1 |   81.25 |   89.47 | ...81,305,332,336 
+  ...-generator.ts |     100 |       90 |     100 |     100 | 47                
+ ...rventions/hitl |      75 |    76.47 |   56.25 |   73.03 |                   
+  classifier.ts    |    92.3 |    83.33 |     100 |    92.3 | 77                
+  hitl.ts          |   72.28 |     75.8 |      50 |   69.73 | ...53,257-258,283 
+ ...ering/handlers |   85.71 |    65.21 |   72.72 |   87.87 |                   
+  handler.ts       |      75 |      100 |   66.66 |   71.42 | 69-73             
+  llm.ts           |   88.88 |     61.9 |      80 |    92.3 | 213-215           
+ ...ring/providers |     100 |       90 |     100 |     100 |                   
+  tool-ledger.ts   |     100 |       90 |     100 |     100 | 98                
+ ...knowledge-base |    97.9 |    97.93 |     100 |    98.2 |                   
+  store.ts         |    97.9 |    97.93 |     100 |    98.2 | 370,728-729       
+ ...e-memory-store |   91.75 |    87.75 |   88.23 |   90.47 |                   
+  store.ts         |   91.75 |    87.75 |   88.23 |   90.47 | 205-206,213-223   
+ ...text-offloader |   94.71 |    86.25 |   98.33 |   96.09 |                   
+  plugin.ts        |   92.16 |    81.87 |   96.15 |   93.65 | ...22,410-413,438 
+  search.ts        |    97.1 |     92.3 |     100 |     100 | 20,48-50          
+  storage.ts       |   97.02 |    92.59 |     100 |   97.51 | 243,388-390       
+ ...d-plugins/goal |   98.01 |    93.67 |     100 |   98.92 |                   
+  judge.ts         |   93.75 |    84.61 |     100 |   93.33 | 89                
+  plugin.ts        |   98.82 |    95.45 |     100 |     100 | 260,336,418       
+ ...plugins/skills |   90.63 |    85.71 |   89.36 |   91.37 |                   
+  agent-skills.ts  |   91.54 |    85.21 |   91.42 |   93.12 | ...93,421,438,540 
+  skill.ts         |   89.23 |    86.27 |   83.33 |    88.7 | ...13,135,141,153 
+ ...ols/a2a-client |      96 |    94.28 |     100 |      96 |                   
+  a2a-client.ts    |      96 |    94.28 |     100 |      96 | 117,130           
+ ...ded-tools/bash |    92.1 |    88.09 |   94.73 |    92.1 |                   
+  bash.ts          |   91.74 |    88.09 |   94.11 |   91.74 | ...26-128,165-167 
+ ...ls/file-editor |   96.15 |    92.07 |     100 |   96.71 |                   
+  file-editor.ts   |   96.15 |    92.07 |     100 |   96.71 | ...18,369,390,415 
+ ...ols/mcp-router |   96.96 |    90.56 |     100 |   97.91 |                   
+  mcp-router.ts    |   96.87 |    90.56 |     100 |   97.84 | 96,141            
+ ...tools/notebook |   96.72 |    96.66 |     100 |   96.61 |                   
+  notebook.ts      |   96.72 |    96.66 |     100 |   96.61 | 119,158,249,346   
+ ...ed-tools/shell |      92 |    85.71 |     100 |   91.66 |                   
+  make-shell.ts    |   88.88 |    88.46 |     100 |   88.88 | 57,72             
+  types.ts         |     100 |       50 |     100 |     100 | 28                
+ ...ed-tools/sleep |   96.29 |     87.5 |     100 |   96.29 |                   
+  make-sleep.ts    |   95.65 |     87.5 |     100 |   95.65 | 101               
+ ...tools/subagent |   99.09 |    95.42 |     100 |   99.06 |                   
+  subagent.ts      |   99.08 |    95.42 |     100 |   99.05 | 537,584           
+ ...ools/web-fetch |   97.76 |       90 |   93.75 |   97.67 |                   
+  extract.ts       |   97.56 |       75 |     100 |   97.29 | 47                
+  web-fetch.ts     |    97.8 |    93.75 |    87.5 |   97.77 | 160,201           
+-------------------|---------|----------|---------|---------|-------------------
+
+=============================== Coverage summary ===============================
+Statements   : 93.26% ( 12634/13546 )
+Branches     : 88.3% ( 8199/9285 )
+Functions    : 95.74% ( 2162/2258 )
+Lines        : 94.02% ( 11760/12507 )
+================================================================================
+  skipped (CI-only / --heavy): browser tests, test:package, npm-pack smoke test
+
+============================================
+Failures in: typescript
+
+--- FAILED: npm audit (--audit-level=high) ---
+fix available via `npm audit fix`
+node_modules/nanoid
+
+protobufjs  7.5.0 - 7.6.4
+Severity: moderate
+protobufjs: Denial of Service via infinite loop in .proto option parsing - https://github.com/advisories/GHSA-j3f2-48v5-ccww
+fix available via `npm audit fix`
+node_modules/protobufjs
+
+qs  2.2.5 - 6.15.3
+Severity: moderate
+qs array-limit bypass via bracket-key comma parsing - https://github.com/advisories/GHSA-x5fp-wj9c-mxmx
+qs: Denial of Service via Attacker Controlled isBuffer - https://github.com/advisories/GHSA-4mjr-xmp4-gh2g
+fix available via `npm audit fix`
+node_modules/qs
+
+5 vulnerabilities (2 moderate, 3 high)
+
+To address all issues, run:
+  npm audit fix
+
+</pre></details>
+</section><footer>Prepared with Codex assistance. The contributor's human-authored overview and line-by-line sign-off remain pending; this evidence does not replace them. Raw logs are alongside this report.</footer>
+</main></body></html>
