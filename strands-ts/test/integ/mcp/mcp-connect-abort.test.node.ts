@@ -4,7 +4,7 @@ import { promisify } from 'node:util'
 import { createMcpHandler, McpServer } from '@modelcontextprotocol/server'
 import { toNodeHandler } from '@modelcontextprotocol/node'
 import { describe, it, expect, vi } from 'vitest'
-import { McpClient } from '../../../src/mcp/client.js'
+import { McpClient } from '@strands-agents/sdk'
 import type { AddressInfo } from 'node:net'
 
 describe('McpClient', () => {
